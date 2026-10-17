@@ -85,6 +85,8 @@ static String body() {
          // backends read back, where ACE only ever talks to the printer.
          "<select id='tg-fmt' onchange='loadPreview()' style='flex:0 0 auto'>"
          "<option value='1' selected>OpenSpool</option>"
+         "<option value='5'>Spool URL + OpenSpool</option>"
+         "<option value='4'>Spool URL</option>"
          "<option value='3'>FilaMan</option>"
          "<option value='0'>Anycubic ACE</option>"
          "</select></div></div>"
@@ -146,6 +148,8 @@ static String body() {
   h += F("</label><div class='inrow'>"
          "<select id='to-fmt' style='min-width:210px'>"
          "<option value='1'>OpenSpool</option>"
+         "<option value='5'>Spool URL + OpenSpool</option>"
+         "<option value='4'>Spool URL</option>"
          "<option value='3'>FilaMan</option>"
          "<option value='0'>Anycubic ACE</option>"
          "</select></div></div>"
@@ -617,6 +621,8 @@ static TagFormat fmtFromInt(int f) {
     case 0:  return TAG_FMT_ACE;
     case 2:  return TAG_FMT_ERASE;
     case 3:  return TAG_FMT_FILAMAN;
+    case 4:  return TAG_FMT_URL;            // sdfp fork
+    case 5:  return TAG_FMT_URL_OPENSPOOL;  // sdfp fork
     default: return TAG_FMT_OPENSPOOL;
   }
 }
@@ -877,7 +883,7 @@ static void routes(WebServer &srv) {
       const int f = body.substring(c1 + 1, c2 < 0 ? body.length() : c2).toInt();
       // Only the three the device can write. Erase answers an unlink and is
       // not offered here, and an unknown number must not reach NVS.
-      if (f == TAG_FMT_ACE || f == TAG_FMT_OPENSPOOL || f == TAG_FMT_FILAMAN)
+      if (f != TAG_FMT_ERASE && TAG_FMT_WRITABLE(f))
         g_tagwrite_fmt = (uint8_t)f;
     }
     // Absent from a page still sitting in a browser from before this switch

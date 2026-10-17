@@ -228,11 +228,13 @@ void buildScaleSubScreen() {
 // Indexed the way the rows are ordered, not by TagFormat value: OpenSpool
 // first because it is what the filament managers read, ACE last because it
 // only ever talks to the printer.
-static const uint8_t TW_FMT_ORDER[3] = {
-  TAG_FMT_OPENSPOOL, TAG_FMT_FILAMAN, TAG_FMT_ACE
+// sdfp fork: the spool URL formats after OpenSpool (services/spool_url.h).
+#define TW_FMT_COUNT 5
+static const uint8_t TW_FMT_ORDER[TW_FMT_COUNT] = {
+  TAG_FMT_OPENSPOOL, TAG_FMT_URL_OPENSPOOL, TAG_FMT_URL, TAG_FMT_FILAMAN, TAG_FMT_ACE
 };
-static const StringID TW_FMT_NAME[3] = {
-  STR_TW_FMT_OPENSPOOL, STR_TW_FMT_FILAMAN, STR_TW_FMT_ACE
+static const StringID TW_FMT_NAME[TW_FMT_COUNT] = {
+  STR_TW_FMT_OPENSPOOL, STR_TW_FMT_URL_OS, STR_TW_FMT_URL, STR_TW_FMT_FILAMAN, STR_TW_FMT_ACE
 };
 
 static void addTagFormatRow(lv_obj_t *list, uint8_t idx) {
@@ -356,5 +358,5 @@ void buildTagWriteScreen() {
     lv_obj_t *arr_lbl = lv_obj_get_child(btn, -1);
     if (arr_lbl) lv_label_set_text(arr_lbl, ""); }
 
-  for (uint8_t i = 0; i < 3; i++) addTagFormatRow(list, i);
+  for (uint8_t i = 0; i < TW_FMT_COUNT; i++) addTagFormatRow(list, i);
 }

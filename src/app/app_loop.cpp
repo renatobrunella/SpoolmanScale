@@ -10,6 +10,7 @@
 
 #include "app_config.h"
 #include "bambu/bambu_catalog_sync.h"
+#include "services/spool_url.h"
 #include "services/drying_sync.h"
 #include "services/backend_http.h"
 #include "app/app_boot.h"
@@ -2086,6 +2087,9 @@ void appLoop() {
             querySpoolman(uid_str, LOOKUP_FROM_NTAG);
             strncpy(spoolman_queried_uid, uid_str, sizeof(spoolman_queried_uid)-1);
             spoolman_queried_uid[sizeof(spoolman_queried_uid)-1] = '\0';
+            // sdfp fork: an unknown tag whose spool URL names a spool links
+            // itself (services/spool_url.h).
+            spoolUrlAfterLookup();
             // A verdict that waits for the inventory is followed up by
             // lookupScanTick() once it is in.
             if (!lookupPending()) lookupFollowUp(LOOKUP_FROM_NTAG, uid_str);

@@ -17,6 +17,7 @@
 #include "services/backend.h"
 #include "services/backend_api.h"
 #include "services/filaman_api.h"
+#include "services/spool_url.h"
 #include "services/tag_field.h"
 #include "services/tag_link.h"
 #include "services/tag_uid.h"
@@ -318,6 +319,10 @@ void tagInfoJson(const TagInfo *ti, char *out, size_t out_len) {
     jesc(ti->material, e, sizeof(e));
     n = appendf(out, out_len, n, ",\"material\":\"%s\"", e);
   }
+  if (ti->spool_code[0]) {  // sdfp fork
+    jesc(ti->spool_code, e, sizeof(e));
+    n = appendf(out, out_len, n, ",\"spool_code\":\"%s\"", e);
+  }
   if (ti->spool_id > 0) n = appendf(out, out_len, n, ",\"spool_id\":%d", ti->spool_id);
   if (ti->proto[0]) {
     jesc(ti->proto, e, sizeof(e));
@@ -499,19 +504,29 @@ static bool writeAce(const AceFields *f) {
 }
 
 
-// NDEF on an NTAG: TLV 0x03, length, one application/json record, 0xFE.
-// Record header D2 = MB|ME|SR, TNF 2 (media type).
+// NDEF on an NTAG: TLV 0x03, length, the NDEF message, 0xFE. The message is
+// one application/json record (header D2 = MB|ME|SR, TNF 2, media type), or -
+// sdfp fork - a URI record (TNF 1, type "U"), or a URI record followed by the
+// JSON one.
 //
-// The single byte TLV length field is what caps the payload, not the tag: past
-// 255 total the TLV would need its three byte form, which nothing here writes.
+// The JSON payload stays capped at 250 so the plain OpenSpool record keeps its
+// one byte TLV length, byte for byte what this firmware always wrote. A URI and
+// a JSON record together can pass 254, and then the TLV takes its three byte
+// form (0xFF, length high, length low), which readOpenSpool() reads as well.
 #define NDEF_JSON_MAX 250
+#define NDEF_MSG_MAX  320
 
-// TLV tag and length, record header with type and payload length, the media
-// type itself, the payload, the terminator - then rounded up to whole 4 byte
-// pages, because that is the unit a write goes in.
-size_t tagNdefSizeFor(size_t json_len) {
-  const size_t n = 2 + 3 + 16 + json_len + 1;
+// The TLV around a message of msg_len bytes, the terminator, and rounding up to
+// whole 4 byte pages, because that is the unit a write goes in.
+static size_t ndefTlvSize(size_t msg_len) {
+  const size_t n = (msg_len <= 254 ? 2 : 4) + msg_len + 1;
   return n + ((4 - (n % 4)) % 4);
+}
+
+// The plain OpenSpool record: header, type length, payload length, the media
+// type, the payload.
+size_t tagNdefSizeFor(size_t json_len) {
+  return ndefTlvSize(3 + 16 + json_len);
 }
 
 static char    write_err[80] = "";
@@ -519,17 +534,32 @@ static uint8_t write_code = TW_ERR_WRITE;
 static char    remote_payload[320] = "";
 static char    remote_proto[12] = "";
 
-// Wraps a JSON document in the NDEF TLV an OpenSpool reader expects.
-static bool writeNdefJson(const char *json) {
-  const int n = (int)strlen(json);
-  if (n <= 0 || n > NDEF_JSON_MAX) return false;
+static const char NDEF_JSON_TYPE[] = "application/json";
+#define NDEF_MB 0x80
+#define NDEF_ME 0x40
+#define NDEF_SR 0x10
 
-  static const char TYPE[] = "application/json";
-  const uint8_t tlen = sizeof(TYPE) - 1;
+// One short record into out at *at. False when it would not fit `cap`.
+static bool ndefRecord(uint8_t *out, size_t cap, size_t *at, uint8_t flags, uint8_t tnf,
+                       const char *type, const uint8_t *payload, size_t plen) {
+  const size_t tlen = strlen(type);
+  if (plen > 255 || tlen > 255 || *at + 3 + tlen + plen > cap) return false;
+  out[(*at)++] = (uint8_t)(flags | NDEF_SR | tnf);
+  out[(*at)++] = (uint8_t)tlen;
+  out[(*at)++] = (uint8_t)plen;
+  memcpy(out + *at, type, tlen);    *at += tlen;
+  memcpy(out + *at, payload, plen); *at += plen;
+  return true;
+}
+
+// Writes an NDEF message - one or more records, already laid out - wrapped in
+// its TLV. `what` names the content in the "needs N bytes" message.
+static bool writeNdefMessage(const uint8_t *msg, size_t msg_len, const char *what) {
+  if (!msg_len || msg_len > NDEF_MSG_MAX) return false;
 
   // Settled before a single byte is laid out: the same arithmetic the preview
   // uses, so a tag the page called too small is exactly the one that fails here.
-  const int i_need = (int)tagNdefSizeFor((size_t)n);
+  const int i_need = (int)ndefTlvSize(msg_len);
   {
     const uint8_t need_last = (uint8_t)(4 + (i_need + 3) / 4 - 1);
     const uint8_t last = lastUserPage();
@@ -544,22 +574,24 @@ static bool writeNdefJson(const char *json) {
                  "Tag reports no size. Format it as NDEF once, then retry");
       else
         snprintf(write_err, sizeof(write_err),
-                 "OpenSpool needs %d bytes, this tag holds %u", i_need,
+                 "%s needs %d bytes, this tag holds %u", what, i_need,
                  (unsigned)((last - 3) * 4));
       write_code = TW_ERR_SPACE;
       return false;
     }
   }
 
-  uint8_t buf[288];
+  uint8_t buf[NDEF_MSG_MAX + 8];
   int i = 0;
   buf[i++] = 0x03;                       // NDEF message TLV
-  buf[i++] = (uint8_t)(3 + tlen + n);    // record header + type + payload
-  buf[i++] = 0xD2;
-  buf[i++] = tlen;
-  buf[i++] = (uint8_t)n;
-  memcpy(buf + i, TYPE, tlen); i += tlen;
-  memcpy(buf + i, json, n);    i += n;
+  if (msg_len <= 254) {
+    buf[i++] = (uint8_t)msg_len;
+  } else {
+    buf[i++] = 0xFF;                     // three byte length form
+    buf[i++] = (uint8_t)(msg_len >> 8);
+    buf[i++] = (uint8_t)(msg_len & 0xFF);
+  }
+  memcpy(buf + i, msg, msg_len); i += (int)msg_len;
   buf[i++] = 0xFE;                       // terminator
   while (i % 4) buf[i++] = 0x00;
 
@@ -587,6 +619,63 @@ static bool writeNdefJson(const char *json) {
   return true;
 }
 
+// Wraps a JSON document in the NDEF TLV an OpenSpool reader expects.
+static bool writeNdefJson(const char *json) {
+  const size_t n = strlen(json);
+  if (!n || n > NDEF_JSON_MAX) return false;
+  uint8_t msg[NDEF_MSG_MAX];
+  size_t at = 0;
+  if (!ndefRecord(msg, sizeof(msg), &at, NDEF_MB | NDEF_ME, 0x02, NDEF_JSON_TYPE,
+                  (const uint8_t *)json, n)) return false;
+  return writeNdefMessage(msg, at, "OpenSpool");
+}
+
+// ---- sdfp fork: the spool URL -----------------------------------------------
+// URI record payload: an identifier code standing for the scheme (0x04 is
+// "https://", NFC Forum URI RTD), then the rest. Exactly what a phone writes
+// for https://spooldb.com/s/<code>, so tags from either reader look the same.
+#define SPOOL_URL_REST "spooldb.com/s/"
+
+// The URI record payload for a short code into out; its length, 0 if invalid.
+static size_t spoolUrlPayload(const char *code, uint8_t *out, size_t cap) {
+  const size_t clen = strlen(code);
+  const size_t n = 1 + strlen(SPOOL_URL_REST) + clen;
+  if (!clen || clen > 20 || n > cap) return 0;
+  for (const char *c = code; *c; c++)
+    if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_') return 0;
+  out[0] = 0x04;
+  memcpy(out + 1, SPOOL_URL_REST, strlen(SPOOL_URL_REST));
+  memcpy(out + 1 + strlen(SPOOL_URL_REST), code, clen);
+  return n;
+}
+
+// The message a URL format writes: the URI record, then for URL + OpenSpool
+// the JSON record. Its length, 0 when it could not be laid out.
+static size_t buildUrlMessage(const char *code, const char *json, uint8_t *msg, size_t cap) {
+  uint8_t uri[48];
+  const size_t ulen = spoolUrlPayload(code, uri, sizeof(uri));
+  if (!ulen) return 0;
+  size_t at = 0;
+  const bool both = json && json[0];
+  if (!ndefRecord(msg, cap, &at, NDEF_MB | (both ? 0 : NDEF_ME), 0x01, "U", uri, ulen))
+    return 0;
+  if (both && !ndefRecord(msg, cap, &at, NDEF_ME, 0x02, NDEF_JSON_TYPE,
+                          (const uint8_t *)json, strlen(json))) return 0;
+  return at;
+}
+
+// The spool's sdfp short code: extra.sdfp_short_code, which arrives JSON
+// encoded and still in its quotes. "" when the spool has none.
+static void spoolShortCode(JsonObjectConst sp, char *out, size_t out_len) {
+  out[0] = 0;
+  const char *s = sp["extra"]["sdfp_short_code"] | "";
+  size_t len = strlen(s);
+  if (len >= 2 && s[0] == '"' && s[len - 1] == '"') { s++; len -= 2; }
+  if (len >= out_len) len = out_len - 1;
+  memcpy(out, s, len);
+  out[len] = 0;
+}
+
 // Two names for the same number, because two readers look for two different
 // keys. sm_id is the OpenSpool convention this firmware has always written and
 // what OpenSpoolman resolves. spool_id is what FilaMan's own reader looks for -
@@ -595,9 +684,11 @@ static bool writeNdefJson(const char *json) {
 // What the format is called where a person reads it.
 static const char* fmtLabel(TagFormat fmt) {
   switch (fmt) {
-    case TAG_FMT_ACE:     return "ACE";
-    case TAG_FMT_FILAMAN: return "FilaMan";
-    default:              return "OpenSpool";
+    case TAG_FMT_ACE:           return "ACE";
+    case TAG_FMT_FILAMAN:       return "FilaMan";
+    case TAG_FMT_URL:           return "Spool URL";
+    case TAG_FMT_URL_OPENSPOOL: return "URL + OpenSpool";
+    default:                    return "OpenSpool";
   }
 }
 
@@ -610,6 +701,8 @@ const char* tagFormatLabel(uint8_t fmt) {
     case TAG_FMT_ACE:       return "Anycubic ACE";
     case TAG_FMT_FILAMAN:   return "FilaMan";
     case TAG_FMT_ERASE:     return "erase";
+    case TAG_FMT_URL:       return "Spool URL";
+    case TAG_FMT_URL_OPENSPOOL: return "URL + OpenSpool";
     default:                return "OpenSpool";
   }
 }
@@ -630,6 +723,31 @@ static bool writeOpenSpool(const AceFields *f, int spool_id, TagFormat fmt) {
   char json[224];
   if (!buildOpenSpoolJson(f, spool_id, fmt, json, sizeof(json))) return false;
   return writeNdefJson(json);
+}
+
+// sdfp fork: the spool URL, alone or ahead of the OpenSpool record. The short
+// code comes from the spool itself - sdfp_spoolman.py puts it there on import.
+static bool writeSpoolUrl(JsonObjectConst sp, const AceFields *f, int spool_id,
+                          TagFormat fmt) {
+  char code[24];
+  spoolShortCode(sp, code, sizeof(code));
+  if (!code[0]) {
+    snprintf(write_err, sizeof(write_err),
+             "Spool %d has no sdfp short code - import it with sdfp first", spool_id);
+    write_code = TW_ERR_BACKEND;
+    return false;
+  }
+  char json[224] = "";
+  if (fmt == TAG_FMT_URL_OPENSPOOL &&
+      !buildOpenSpoolJson(f, spool_id, TAG_FMT_OPENSPOOL, json, sizeof(json))) return false;
+  uint8_t msg[NDEF_MSG_MAX];
+  const size_t n = buildUrlMessage(code, json, msg, sizeof(msg));
+  if (!n) {
+    snprintf(write_err, sizeof(write_err), "Spool code '%s' cannot go in a URL", code);
+    write_code = TW_ERR_BACKEND;
+    return false;
+  }
+  return writeNdefMessage(msg, n, fmtLabel(fmt));
 }
 
 // What the server sent is kept exactly as it sent it - spool_id included. An
@@ -717,29 +835,84 @@ static bool isSupportedRecord(const char *json) {
   return !strcmp(proto, "openspool") || !strcmp(proto, "filaman");
 }
 
-// Reads the JSON payload back out of the NDEF wrapper.
-static bool readOpenSpool(char *out, size_t out_len) {
+// URI identifier codes 0x00-0x04 (NFC Forum URI RTD), the ones in real use.
+static const char *const URI_PREFIX[] = {
+  "", "http://www.", "https://www.", "http://", "https://"
+};
+
+// Reads the NDEF message back and walks its records. The JSON payload goes to
+// out (the OpenSpool record; or, as before, a first record nothing claims, so
+// the raw view can show it), and - sdfp fork - the short code of a spooldb.com
+// spool URL to code. True when out holds a supported OpenSpool/FilaMan record.
+static bool readOpenSpool(char *out, size_t out_len, char *code, size_t code_len) {
+  out[0] = 0;
+  if (code && code_len) code[0] = 0;
   // Zeroed: only the pages the TLV claims are read, and a record that says it
   // reaches past them must copy zeros, not whatever the stack held before.
-  uint8_t buf[240] = {0};
+  uint8_t buf[NDEF_MSG_MAX + 8] = {0};
   if (!nfcReadNtagPage(4, buf)) return false;
   if (buf[0] != 0x03) return false;          // not an NDEF TLV, stop here
-  int len = buf[1];
-  const int need = 2 + len;
+  int hdr = 2, len = buf[1];
+  if (len == 0xFF) {                         // three byte length form
+    hdr = 4;
+    len = (buf[2] << 8) | buf[3];
+  }
+  const int need = hdr + len;
   const int pages = (need + 3) / 4;
   if (pages > (int)sizeof(buf) / 4) return false;
   for (int p2 = 1; p2 < pages; p2++)
     if (!nfcReadNtagPage((uint8_t)(4 + p2), buf + p2 * 4)) return false;
-  if (len < 5 || 2 + len > (int)sizeof(buf)) return false;
-  int tlen = buf[3];
-  int plen = buf[4];
-  int start = 5 + tlen;
-  // Within what was read (2 + len), not merely within the buffer.
-  if (plen <= 0 || start + plen > 2 + len) return false;
-  size_t copy = (size_t)plen < out_len - 1 ? (size_t)plen : out_len - 1;
-  memcpy(out, buf + start, copy);
-  out[copy] = 0;
-  return isSupportedRecord(out);
+  if (len < 3) return false;
+
+  bool supported = false;
+  bool first = true;
+  int p = hdr;
+  const int end = hdr + len;   // within what was read, not merely within the buffer
+  while (p + 3 <= end) {
+    const uint8_t h = buf[p];
+    const uint8_t tnf = h & 0x07;
+    const bool sr = h & NDEF_SR, il = h & 0x08, chunk = h & 0x20;
+    int q = p + 1;
+    const int tlen = buf[q++];
+    int plen;
+    if (sr) {
+      plen = buf[q++];
+    } else {
+      if (q + 4 > end) break;
+      plen = (buf[q] << 24) | (buf[q + 1] << 16) | (buf[q + 2] << 8) | buf[q + 3];
+      q += 4;
+    }
+    const int idlen = il ? buf[q++] : 0;
+    const int type_at = q, pay_at = q + tlen + idlen;
+    if (plen < 0 || pay_at + plen > end) break;
+    if (!chunk) {
+      if (tnf == 0x01 && tlen == 1 && buf[type_at] == 'U' && plen >= 1 && code && code_len &&
+          !code[0]) {
+        char url[96];
+        const uint8_t id = buf[pay_at];
+        snprintf(url, sizeof(url), "%s%.*s", id < 5 ? URI_PREFIX[id] : "",
+                 plen - 1, (const char *)buf + pay_at + 1);
+        spoolUrlShortCode(url, code, code_len);
+      } else if (tnf == 0x02 && tlen == 16 && !memcmp(buf + type_at, NDEF_JSON_TYPE, 16) &&
+                 !supported) {
+        size_t copy = (size_t)plen < out_len - 1 ? (size_t)plen : out_len - 1;
+        memcpy(out, buf + pay_at, copy);
+        out[copy] = 0;
+        supported = isSupportedRecord(out);
+      } else if (first && !out[0] && plen > 0) {
+        // Not a record anything here reads: kept for the raw view, as the
+        // reader always did with a first record.
+        size_t copy = (size_t)plen < out_len - 1 ? (size_t)plen : out_len - 1;
+        memcpy(out, buf + pay_at, copy);
+        out[copy] = 0;
+      }
+    }
+    first = false;
+    p = pay_at + plen;
+    if (h & NDEF_ME) break;
+  }
+  if (!supported && code && code[0] && out[0] && !isSupportedRecord(out)) out[0] = 0;
+  return supported;
 }
 
 // OpenSpool carries the temperatures as JSON strings - "min_temp":"200" - and
@@ -829,9 +1002,23 @@ static bool tagDescribe(char *out, size_t out_len, TagInfo *ti) {
 
   char json[224];
   json[0] = 0;
-  if (readOpenSpool(json, sizeof(json))) {
+  char code[24] = "";
+  if (readOpenSpool(json, sizeof(json), code, sizeof(code))) {
     snprintf(cached_raw, sizeof(cached_raw), "%s", json);
     describeOpenSpool(json, out, out_len, ti);
+    if (ti) snprintf(ti->spool_code, sizeof(ti->spool_code), "%s", code);
+    return true;
+  }
+  if (code[0]) {
+    // sdfp fork: a tag that carries only the spool's URL.
+    snprintf(out, out_len, "Spool URL: %s", code);
+    if (ti) {
+      snprintf(ti->fmt, sizeof(ti->fmt), "Spool URL");
+      snprintf(ti->spool_code, sizeof(ti->spool_code), "%s", code);
+    }
+    snprintf(cached_raw, sizeof(cached_raw),
+             "{\"format\":\"Spool URL\",\"uid\":\"%s\",\"url\":\"https://" SPOOL_URL_REST
+             "%s\"}", g_tag.uid_str, code);
     return true;
   }
   if (json[0]) {
@@ -937,6 +1124,39 @@ bool tagPreview(int spool_id, TagFormat fmt, char *out, size_t out_len,
   }
   AceFields f;
   buildAce(sp, &f);
+  if (TAG_FMT_HAS_URL(fmt)) {
+    // sdfp fork: measured on the message that would really be written.
+    char code[24];
+    spoolShortCode(sp, code, sizeof(code));
+    char json[224] = "";
+    if (fmt == TAG_FMT_URL_OPENSPOOL)
+      buildOpenSpoolJson(&f, spool_id, TAG_FMT_OPENSPOOL, json, sizeof(json));
+    uint8_t msg[NDEF_MSG_MAX];
+    const size_t n = code[0] ? buildUrlMessage(code, json, msg, sizeof(msg)) : 0;
+    if (!n) {
+      snprintf(out, out_len, "Spool URL: spool %d has no sdfp short code", spool_id);
+      return false;
+    }
+    if (need) *need = (uint16_t)ndefTlvSize(n);
+    if (info) {
+      if (fmt == TAG_FMT_URL_OPENSPOOL) {
+        // Reads back as an OpenSpool tag that also carries the URL.
+        aceToInfo(&f, info);
+        snprintf(info->fmt, sizeof(info->fmt), "OpenSpool");
+        info->sku[0] = 0;
+        info->bed_lo = info->bed_hi = 0;
+        info->dia_x100 = info->length_m = info->weight_g = 0;
+        info->spool_id = spool_id;
+        snprintf(info->proto, sizeof(info->proto), "openspool");
+        snprintf(info->version, sizeof(info->version), "1.0");
+      } else {
+        snprintf(info->fmt, sizeof(info->fmt), "Spool URL");
+      }
+      snprintf(info->spool_code, sizeof(info->spool_code), "%s", code);
+    }
+    snprintf(out, out_len, "%s: https://" SPOOL_URL_REST "%s", fmtLabel(fmt), code);
+    return true;
+  }
   if (info) {
     aceToInfo(&f, info);
     if (TAG_FMT_IS_NDEF(fmt)) {
@@ -1313,7 +1533,11 @@ static bool writeSpoolRecord(int spool_id, TagFormat fmt,
   {
     AceFields f;
     buildAce(sp, &f);
-    ok = TAG_FMT_IS_NDEF(fmt) ? writeOpenSpool(&f, spool_id, fmt) : writeAce(&f);
+    if (TAG_FMT_HAS_URL(fmt)) {
+      ok = writeSpoolUrl(sp, &f, spool_id, fmt);
+    } else {
+      ok = TAG_FMT_IS_NDEF(fmt) ? writeOpenSpool(&f, spool_id, fmt) : writeAce(&f);
+    }
   }
 
   cache_dirty = true;   // the tag changed under a UID that did not

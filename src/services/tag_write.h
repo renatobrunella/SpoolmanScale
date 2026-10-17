@@ -11,10 +11,23 @@ enum TagFormat : uint8_t {
   // differs from OpenSpool in one string and nothing else. It exists so a tag
   // can be labelled the way a FilaMan installation expects to find it.
   TAG_FMT_FILAMAN = 3,
+  // sdfp fork: the spool's page on 3dfilamentprofiles.com as an NDEF URI record,
+  // https://spooldb.com/s/<sdfp_short_code> - what a phone opens, and what the
+  // scale reads back to link the tag by itself (services/spool_url.h).
+  TAG_FMT_URL = 4,
+  // The same URI record first, then the OpenSpool record, in one NDEF message:
+  // the phone link and what the filament managers read, on one NTAG215.
+  TAG_FMT_URL_OPENSPOOL = 5,
 };
 
-// True for the formats that go on the tag as an NDEF JSON record.
-#define TAG_FMT_IS_NDEF(f)  ((f) == TAG_FMT_OPENSPOOL || (f) == TAG_FMT_FILAMAN)
+// True for the formats that carry the NDEF JSON record. The size floor below
+// applies to exactly these: a URI record alone fits even an NTAG213.
+#define TAG_FMT_IS_NDEF(f)  ((f) == TAG_FMT_OPENSPOOL || (f) == TAG_FMT_FILAMAN || \
+                             (f) == TAG_FMT_URL_OPENSPOOL)
+// True for the formats that carry the spool URL.
+#define TAG_FMT_HAS_URL(f)  ((f) == TAG_FMT_URL || (f) == TAG_FMT_URL_OPENSPOOL)
+// Every format the link flow may write; a persisted value outside it is reset.
+#define TAG_FMT_WRITABLE(f) ((f) == TAG_FMT_ACE || TAG_FMT_IS_NDEF(f) || TAG_FMT_HAS_URL(f))
 
 // What a tag has to hold before an NDEF record is worth attempting. The record
 // is around 150 to 190 bytes depending on how long the brand and material
@@ -197,6 +210,8 @@ struct TagInfo {
   bool     has_color2;
   uint8_t  r2, g2, b2;
   int      spool_id;      // 0 if none
+  // sdfp fork: the short code of a spooldb.com spool URL on the tag, "" if none.
+  char     spool_code[24];
   char     proto[17];     // e.g. "openspool"
   char     version[12];   // e.g. "1.0"
 };

@@ -142,7 +142,7 @@ void loadPrefs() {
   // cannot write. TAG_FMT_ERASE is deliberately not offered here - erasing is
   // an answer to an unlink, not to a link.
   g_tagwrite_fmt   = prefsGetUChar("tagwrite_fmt", TAG_FMT_OPENSPOOL);
-  if (g_tagwrite_fmt != TAG_FMT_ACE && !TAG_FMT_IS_NDEF(g_tagwrite_fmt))
+  if (!TAG_FMT_WRITABLE(g_tagwrite_fmt))
     g_tagwrite_fmt = TAG_FMT_OPENSPOOL;
   gh_prerelease = prefsGetBool("gh_prerelease", false);
   g_upd_autocheck = prefsGetBool("upd_check", true);
