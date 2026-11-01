@@ -14,6 +14,9 @@
 !images/**
 !tools/
 !tools/**
+!test/
+!test/**
+!LICENSE
 # Python caches the tools leave behind.
 **/__pycache__/
 # A bench helper that stays on the machine it was written for.
@@ -25,6 +28,8 @@ tools/serial_logger.py
 # file in every directory it covers - it turned up in src/ next.
 **/.DS_Store
 images/*~lock~
+# Affinity source documents of the images: they stay on the machine.
+images/*.af
 # Full-size originals and working images - the MakerWorld exports, raw photos,
 # simulator shots. The repository carries the web-sized JPEGs made from them.
 images/images_not_for_github/
@@ -42,6 +47,5 @@ images/images_not_for_github/
 !version.json
 !README.md
 !BUILDING.md
-!REFACTOR_PLAN.md
 !index.html
 !.gitignore
