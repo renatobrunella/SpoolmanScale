@@ -1,0 +1,2009 @@
+diff -ruN a/src/app/app_loop.cpp b/src/app/app_loop.cpp
+--- a/src/app/app_loop.cpp	2026-11-01 14:33:00
++++ b/src/app/app_loop.cpp	2026-11-01 14:48:16
+@@ -11,6 +11,8 @@
+ #include "app_config.h"
+ #include "bambu/bambu_catalog_sync.h"
+ #include "services/dried_migrate.h"
++#include "services/sound.h"
++#include "services/spool_url.h"
+ #include "services/drying_sync.h"
+ #include "services/backend_http.h"
+ #include "app/app_boot.h"
+@@ -646,6 +648,7 @@
+   // And once the spool is known, whether the tag still says the same thing it
+   // does. Costs a request only while the switch for it is on.
+   tagMismatchTick();
++  tagUrlRecordTick();  // sdfp fork
+   // While the credential screen is open the user types into the browser, so
+   // the two rows have to follow along without a keypress on the device.
+   refreshWebCredentialRows();
+@@ -1203,6 +1206,7 @@
+   int linked_id = tagWriteTakeLinkedSpool();
+   if (!linked_id) linked_id = tagLinkTakeLinkedSpool();
+   if (linked_id) {
++    soundTagLinked();  // sdfp fork
+     if (!isSpoolFlowIdInputOpen() && !isSpoolFlowLinkEntryOpen() &&
+         !isConfirmPopupOpen()) {
+       logSDf("TagWrite: showing spool %d after the link", linked_id);
+@@ -1211,6 +1215,10 @@
+       backendCanHoldSecondTag();
+       tagLookupForget();
+       querySpoolmanById(linked_id);
++      // sdfp fork: a tag that linked itself by its spool URL gets the tag write
++      // a link from the list gets - before the second tag question, which
++      // waits for it.
++      if (spoolUrlTakeAutoLink(linked_id)) spoolFlowTagWriteAfterLink(linked_id);
+       spoolFlowAskSecondTag(linked_id);
+     }
+   }
+@@ -2142,6 +2150,9 @@
+             querySpoolman(uid_str, LOOKUP_FROM_NTAG);
+             strncpy(spoolman_queried_uid, uid_str, sizeof(spoolman_queried_uid)-1);
+             spoolman_queried_uid[sizeof(spoolman_queried_uid)-1] = '\0';
++            // sdfp fork: an unknown tag whose spool URL names a spool links
++            // itself (services/spool_url.h).
++            spoolUrlAfterLookup();
+             // A verdict that waits for the inventory is followed up by
+             // lookupScanTick() once it is in.
+             if (!lookupPending()) lookupFollowUp(LOOKUP_FROM_NTAG, uid_str);
+diff -ruN a/src/app/deferred_actions.cpp b/src/app/deferred_actions.cpp
+--- a/src/app/deferred_actions.cpp	2026-11-01 14:33:00
++++ b/src/app/deferred_actions.cpp	2026-11-01 14:48:16
+@@ -79,3 +79,4 @@
+ bool print_last_filament_label_pending = false;
+ bool label_dates_pending         = false;
+ bool print_own_layout_pending    = false;
++bool print_filament_label_pending = false;
+diff -ruN a/src/app/deferred_actions.h b/src/app/deferred_actions.h
+--- a/src/app/deferred_actions.h	2026-11-01 14:33:00
++++ b/src/app/deferred_actions.h	2026-11-01 14:48:16
+@@ -175,3 +175,5 @@
+ // The print card's answer to a label the server would not draw: print the
+ // same spool with the scale's own layout.
+ extern bool print_own_layout_pending;
++// sdfp fork: the same, for the spool's filament label (label service only).
++extern bool print_filament_label_pending;
+diff -ruN a/src/lang.cpp b/src/lang.cpp
+--- a/src/lang.cpp	2026-11-01 14:33:00
++++ b/src/lang.cpp	2026-11-01 14:48:16
+@@ -1999,9 +1999,22 @@
+     "material, colour, nozzle and bed temperature, diameter, length and "
+     "weight. The ACE reads those itself.",
+     "Le format décide qui pourra lire le tag.\n\nOpenSpool est un enregistrement NDEF contenant le matériau, la couleur, la marque, les températures et l'ID de la bobine ; FilaMan et les lecteurs OpenSpool savent le lire.\n\nFilaMan est le même enregistrement, sous le nom de protocole qu'attend une installation FilaMan.\n\nAnycubic ACE n'écrit aucun enregistrement, mais des pages brutes contenant la référence article, la marque, le matériau, la couleur, les températures de buse et de plateau, le diamètre, la longueur et le poids. L'ACE les lit directement." },  // STR_TW_OPT_FMT_INFO
+-  { "OpenSpool",              "OpenSpool",              "OpenSpool" },  // STR_TW_FMT_OPENSPOOL
+-  { "FilaMan",                "FilaMan",                "FilaMan" },  // STR_TW_FMT_FILAMAN
+-  { "Anycubic ACE",           "Anycubic ACE",           "Anycubic ACE" },  // STR_TW_FMT_ACE
++  { "OpenSpool",              "OpenSpool",             "OpenSpool" },  // STR_TW_FMT_OPENSPOOL
++  { "FilaMan",                "FilaMan",               "FilaMan" },  // STR_TW_FMT_FILAMAN
++  { "Anycubic ACE",           "Anycubic ACE",          "Anycubic ACE" },  // STR_TW_FMT_ACE
++  { "Spulen-URL + OpenSpool", "Spool URL + OpenSpool", "URL bobine + OpenSpool" },  // STR_TW_FMT_URL_OS
++  { "Spulen-URL",             "Spool URL",             "URL bobine" },  // STR_TW_FMT_URL
++  { "Ton beim Scannen",       "Scan sound",            "Son au scan" },  // STR_SOUND
++  { "Ein Ton, wenn ein Tag aufgelegt wird: ein kurzer hoher, wenn die Spule bekannt ist, zwei tiefe, wenn nicht, und ein aufsteigender Zweiklang, wenn ein Tag verknüpft wurde. Braucht einen Lautsprecher am SPK-Anschluss.",
++    "A sound when a tag is placed: one short high beep when the spool is known, two low beeps when it is not, and a rising two-tone chime when a tag was linked. Needs a speaker on the SPK connector.",
++    "Un son quand un tag est posé : un bip aigu si la bobine est connue, deux bips graves sinon, et deux notes montantes quand un tag a été lié. Il faut un haut-parleur sur le connecteur SPK." },  // STR_SOUND_INFO
++  { "Leise",               "Low",            "Bas" },  // STR_SOUND_LOW
++  { "Mittel",              "Medium",         "Moyen" },  // STR_SOUND_MEDIUM
++  { "Laut",                "High",           "Fort" },  // STR_SOUND_HIGH
++  { "OpenSpool ergänzen?", "Add OpenSpool?", "Ajouter OpenSpool ?" },  // STR_TW_URLREC_TITLE
++  { "Dieser Tag trägt nur die URL der Spule. Geschrieben wird %s: die URL bleibt, die OpenSpool-Daten kommen dazu.",
++    "This tag carries only the spool's URL. Writes %s: the URL stays, the OpenSpool record is added.",
++    "Ce tag ne porte que l'URL de la bobine. Écrit %s : l'URL reste, les données OpenSpool s'ajoutent." },  // STR_TW_URLREC_HINT
+   { "Automatik an der Waage", "Automatic on the scale", "Actions automatiques de la balance" },  // STR_W_C_TAGOPTS
+   { "Nach dem Verlinken",     "After linking",          "Après la liaison" },  // STR_W_TAGOPT_ASK
+   { "Format",                 "Format",                 "Format" },  // STR_W_TAGOPT_FMT
+@@ -2794,6 +2807,14 @@
+   { "Etikett drucken",                 "Print label",                "Imprimer" },  // STR_PRN_LABEL_PRINT
+   { "Keine bekannte Spule aufgelegt.", "No known spool on the pad.",
+     "Aucune bobine connue posée." },  // STR_PRN_ERR_NO_SPOOL
++  { "Etikett Spule",                   "Spool label",                "Étiq. bobine" },  // STR_PRN_LABEL_SPOOL
++  { "Etikett Filament",                "Filament label",             "Étiq. filament" },  // STR_PRN_LABEL_FILAMENT
++  { "Etikettendienst",                 "Label service",              "Service d'étiquettes" },  // STR_W_P_SVC_TITLE
++  { "Adresse",                         "Address",                    "Adresse" },  // STR_W_P_SVC_ADDR
++  { "Der Dienst, der die Etiketten rendert, z. B. http://192.168.1.20:8710 (sdfp). Gesetzt: Mehr Info bietet ein Spulen- und ein Filament-Etikett. Leer: das eigene Etikett der Waage.",
++    "The service that renders the labels, e.g. http://192.168.1.20:8710 (sdfp). Set: More info offers a spool label and a filament label. Empty: the scale's own label.",
++    "Le service qui génère les étiquettes, p. ex. http://192.168.1.20:8710 (sdfp). Renseigné : Plus d'infos propose une étiquette bobine et une étiquette filament. Vide : l'étiquette de la balance." },  // STR_W_P_SVC_HINT
++  { "Muss mit http:// beginnen.", "Must start with http://.", "Doit commencer par http://." },  // STR_W_P_SVC_BAD
+   // The captions on a printed label, short: the lines are 16 px on a 40 mm roll
+   { "Farbe", "Colour", "Couleur" },  // STR_LBL_L_COLOR
+   { "Etikett wird erstellt...",
+diff -ruN a/src/lang.h b/src/lang.h
+--- a/src/lang.h	2026-11-01 14:33:00
++++ b/src/lang.h	2026-11-01 14:48:16
+@@ -930,6 +930,15 @@
+   STR_TW_FMT_OPENSPOOL,
+   STR_TW_FMT_FILAMAN,
+   STR_TW_FMT_ACE,
++  STR_TW_FMT_URL_OS,          // sdfp fork: spool URL, then the OpenSpool record
++  STR_TW_FMT_URL,             // sdfp fork: the spool URL alone
++  STR_SOUND,                  // sdfp fork: the scan sounds setting
++  STR_SOUND_INFO,
++  STR_SOUND_LOW,
++  STR_SOUND_MEDIUM,
++  STR_SOUND_HIGH,
++  STR_TW_URLREC_TITLE,        // sdfp fork: add the OpenSpool record to a URL-only tag
++  STR_TW_URLREC_HINT,         // %s = the format written
+   STR_W_C_TAGOPTS,
+   STR_W_TAGOPT_ASK,
+   STR_W_TAGOPT_FMT,
+@@ -1305,6 +1314,13 @@
+   STR_W_P_QUEUED,             // a route's answer when the scale took the job
+   STR_PRN_LABEL_PRINT,        // the button in the More info header
+   STR_PRN_ERR_NO_SPOOL,       // pressed with nothing the backend knows on the pad
++  // sdfp fork: labels from a label service (services/label_fetch.h)
++  STR_PRN_LABEL_SPOOL,        // More info header, left of the X: 130 px button
++  STR_PRN_LABEL_FILAMENT,     // the second one
++  STR_W_P_SVC_TITLE,          // the web card
++  STR_W_P_SVC_ADDR,
++  STR_W_P_SVC_HINT,
++  STR_W_P_SVC_BAD,            // not an http:// address
+   // The captions on a printed label, short: the lines are 16 px on a 40 mm roll
+   STR_LBL_L_COLOR,
+ 
+diff -ruN a/src/services/app_settings.cpp b/src/services/app_settings.cpp
+--- a/src/services/app_settings.cpp	2026-11-01 14:33:00
++++ b/src/services/app_settings.cpp	2026-11-01 14:48:16
+@@ -150,7 +150,7 @@
+   // cannot write. TAG_FMT_ERASE is deliberately not offered here - erasing is
+   // an answer to an unlink, not to a link.
+   g_tagwrite_fmt   = prefsGetUChar("tagwrite_fmt", TAG_FMT_OPENSPOOL);
+-  if (g_tagwrite_fmt != TAG_FMT_ACE && !TAG_FMT_IS_NDEF(g_tagwrite_fmt))
++  if (!TAG_FMT_WRITABLE(g_tagwrite_fmt))
+     g_tagwrite_fmt = TAG_FMT_OPENSPOOL;
+   gh_prerelease = prefsGetBool("gh_prerelease", false);
+   g_upd_autocheck = prefsGetBool("upd_check", true);
+diff -ruN a/src/services/label_fetch.cpp b/src/services/label_fetch.cpp
+--- a/src/services/label_fetch.cpp	1970-01-01 01:00:00
++++ b/src/services/label_fetch.cpp	2026-11-01 14:48:16
+@@ -0,0 +1,180 @@
++#include "services/label_fetch.h"
++
++#include <Arduino.h>
++#include <HTTPClient.h>
++#include <WiFiClient.h>
++#include <esp_heap_caps.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "hardware/sd_logger.h"
++#include "services/prefs_store.h"
++#include "services/wifi_manager.h"
++
++// NVS key: 15 characters at most, and never renamed (see label_printer.cpp).
++#define PREF_LABEL_SVC  "label_svc"
++
++// The print card is up while this runs; the service answers from its cache in
++// well under a second, a cold render takes one or two.
++#define LABEL_FETCH_TIMEOUT_MS  8000
++
++static char s_url[128];
++static bool s_loaded = false;
++
++static void load() {
++  if (s_loaded) return;
++  s_loaded = true;
++  snprintf(s_url, sizeof(s_url), "%s", prefsGetString(PREF_LABEL_SVC, "").c_str());
++}
++
++const char* labelServiceUrl() {
++  load();
++  return s_url;
++}
++
++bool labelServiceConfigured() {
++  load();
++  return s_url[0] != '\0';
++}
++
++bool labelServiceSetUrl(const char* url) {
++  char v[sizeof(s_url)];
++  const char* p = url ? url : "";
++  while (*p == ' ' || *p == '\t') p++;
++  snprintf(v, sizeof(v), "%s", p);
++  size_t n = strlen(v);
++  while (n && (v[n - 1] == ' ' || v[n - 1] == '\t' || v[n - 1] == '\r' ||
++               v[n - 1] == '\n' || v[n - 1] == '/')) v[--n] = '\0';
++  // Plain http only: the service runs on the LAN, and HTTPClient over TLS
++  // would want a certificate the service does not have.
++  if (n && strncmp(v, "http://", 7) != 0) return false;
++  if (!prefsPutString(PREF_LABEL_SVC, v)) return false;
++  snprintf(s_url, sizeof(s_url), "%s", v);
++  s_loaded = true;
++  logSDf("Label service -> '%s'", s_url);
++  return true;
++}
++
++// Says what went wrong in the log, where the caller's fallback is logged next.
++static bool fail(const char* fmt, long a = 0, long b = 0) {
++  char why[96];
++  snprintf(why, sizeof(why), fmt, a, b);
++  logSDf("Label service: %s", why);
++  return false;
++}
++
++bool labelFetchRaster(const LabelPrinterConfig& c, int spool_id, bool filament,
++                      LabelRaster* out) {
++  *out = LabelRaster{};
++  if (!labelServiceConfigured()) return fail("no label service set");
++  if (!wifiManagerIsConnected()) return fail("no WiFi");
++  if (spool_id <= 0) return fail("no spool");
++
++  // The head's resolution: 203 dpi heads are 8 dots to the mm, which the
++  // service calls 203.2; a 300 dpi NIIMBOT gets its own.
++  const uint16_t dpi = labelPrinterProfile(c.model).dpi;
++  char dpi_s[8];
++  if (dpi == 203) snprintf(dpi_s, sizeof(dpi_s), "203.2");
++  else snprintf(dpi_s, sizeof(dpi_s), "%u", (unsigned)dpi);
++  char url[256];
++  snprintf(url, sizeof(url), "%s/label?spoolman_id=%d&w=%u&h=%u&dpi=%s&format=raster%s",
++           s_url, spool_id, (unsigned)c.media_width_mm, (unsigned)c.media_length_mm,
++           dpi_s, filament ? "&what=filament" : "");
++
++  // Its own client and connection: the backend's kept-alive one is not ours to
++  // disturb, and this address is another host or port anyway.
++  WiFiClient net;
++  HTTPClient http;
++  http.setTimeout(LABEL_FETCH_TIMEOUT_MS);
++  http.setConnectTimeout(LABEL_FETCH_TIMEOUT_MS);
++  if (!http.begin(net, url)) return fail("bad label service address");
++  const char* keys[] = {"X-Label-Width", "X-Label-Height", "X-Label-Row-Bytes"};
++  http.collectHeaders(keys, 3);
++  const int code = http.GET();
++  if (code != 200) {
++    http.end();
++    return fail("label service answered HTTP %ld", code);
++  }
++  const long w = http.header("X-Label-Width").toInt();
++  const long h = http.header("X-Label-Height").toInt();
++  const long rb = http.header("X-Label-Row-Bytes").toInt();
++  const long len = http.getSize();
++
++  // The label must be the loaded stock, within the dot of slack the printer
++  // check allows (labelPrinterRasterFits), and shaped as the headers say.
++  const long want_w = labelPrinterContentWidth(c.model, c.media_width_mm);
++  const long want_h = labelPrinterDotsForMm(c.model, c.media_length_mm);
++  if (w < want_w - 1 || w > want_w + 1 || h < want_h - 1 || h > want_h + 1) {
++    http.end();
++    return fail("label is %ld dots wide, the stock wants %ld", w, want_w);
++  }
++  if (rb != (w + 7) / 8 || len != rb * h) {
++    http.end();
++    return fail("label shape does not add up (%ld bytes, %ld per row)", len, rb);
++  }
++
++  // The body, then the print row: the label at the content offset, bit by
++  // bit, as packCanvas() places the canvas.
++  uint8_t* body = (uint8_t*)heap_caps_malloc((size_t)len, MALLOC_CAP_SPIRAM);
++  if (!body) {
++    http.end();
++    return fail("no PSRAM for %ld bytes", len);
++  }
++  WiFiClient* stream = http.getStreamPtr();
++  long got = 0;
++  const uint32_t deadline = millis() + LABEL_FETCH_TIMEOUT_MS;
++  while (got < len && millis() < deadline) {
++    const int avail = stream->available();
++    if (avail <= 0) {
++      if (!http.connected()) break;
++      delay(2);
++      continue;
++    }
++    got += stream->readBytes(body + got, min((long)avail, len - got));
++  }
++  http.end();
++  if (got != len) {
++    free(body);
++    return fail("label cut short: %ld of %ld bytes", got, len);
++  }
++
++  const uint16_t row_w = labelPrinterRasterWidth(c.model, c.media_width_mm);
++  const uint16_t row_bytes = (row_w + 7) / 8;
++  const uint16_t x0 = labelPrinterContentX(c);
++  if (row_w < LABEL_RASTER_MIN_W || x0 + w > row_w) {
++    free(body);
++    return fail("label does not fit the print row (%ld + %ld dots)", x0, w);
++  }
++  const size_t length = (size_t)row_bytes * h;
++  uint8_t* px = (uint8_t*)heap_caps_calloc(length, 1, MALLOC_CAP_SPIRAM);
++  if (!px) {
++    free(body);
++    return fail("no PSRAM for the print row");
++  }
++  for (long y = 0; y < h; y++) {
++    const uint8_t* src = body + y * rb;
++    uint8_t* row = px + (size_t)y * row_bytes;
++    for (long x = 0; x < w; x++) {
++      if (src[x >> 3] & (0x80 >> (x & 7))) {
++        const uint16_t rx = x0 + x;
++        row[rx >> 3] |= 0x80 >> (rx & 7);
++      }
++    }
++  }
++  free(body);
++  out->width = row_w;
++  out->height = (uint16_t)h;
++  out->row_bytes = row_bytes;
++  out->pixels = px;
++  out->length = length;
++  out->content_width = (uint16_t)w;
++  if (!labelRasterValid(*out)) {
++    free(px);
++    *out = LabelRaster{};
++    return fail("label raster invalid");
++  }
++  logSDf("Label: fetched %s label for spool #%d, %ldx%ld dots at x %u",
++         filament ? "filament" : "spool", spool_id, w, h, (unsigned)x0);
++  return true;
++}
+diff -ruN a/src/services/label_fetch.h b/src/services/label_fetch.h
+--- a/src/services/label_fetch.h	1970-01-01 01:00:00
++++ b/src/services/label_fetch.h	2026-11-01 14:48:16
+@@ -0,0 +1,43 @@
++#pragma once
++// ============================================================
++//  label_fetch.h - labels rendered by a label service
++//  sdfp fork addition (SPOOLMANSCALE-SDFP.md, section 5b)
++// ============================================================
++//
++// A label service renders the label and the scale only prints it. The sdfp
++// service (tools/sdfp_service.py, GET /label) serves the label the site
++// 3dfilamentprofiles.com renders - brand logo, material bar, colour, four
++// info lines, QR to the spool's page - which the canvas renderer cannot draw.
++//
++// The contract, everything over plain HTTP on the LAN:
++//
++//   GET <base>/label?spoolman_id=<id>&w=<mm>&h=<mm>&dpi=<head dpi>&format=raster
++//       [&what=filament]
++//   200 application/octet-stream
++//   X-Label-Width: 320      content width in dots (the stock width, not the head)
++//   X-Label-Height: 240
++//   X-Label-Row-Bytes: 40   (width + 7) / 8
++//   body: height x row_bytes, rows MSB first, 1 = black, padding bits 0
++//
++// Anything else is a failure: the caller falls back to the built-in label
++// where there is one.
++
++#include <stddef.h>
++
++#include "services/label_printer.h"
++#include "services/label_raster.h"
++
++// The service's base address, e.g. "http://192.168.1.20:8710". Empty when not
++// set, which keeps the scale's own label and its single print button.
++const char* labelServiceUrl();
++bool labelServiceConfigured();
++// Trimmed, trailing slash dropped. "" clears it. False when the value is not
++// an http:// address or NVS refused the write.
++bool labelServiceSetUrl(const char* url);
++
++// Fetches this spool's label (or its filament's, `filament`) for the loaded
++// stock and places it in a full print row at the configured offset, like the
++// canvas renderer does. On false the log says what went wrong.
++// Blocking, from appLoop() only: up to LABEL_FETCH_TIMEOUT_MS.
++bool labelFetchRaster(const LabelPrinterConfig& config, int spool_id, bool filament,
++                      LabelRaster* out);
+diff -ruN a/src/services/settings_registry.cpp b/src/services/settings_registry.cpp
+--- a/src/services/settings_registry.cpp	2026-11-01 14:33:00
++++ b/src/services/settings_registry.cpp	2026-11-01 14:48:16
+@@ -1,3 +1,4 @@
++#include "services/sound.h"
+ #include "services/settings_registry.h"
+ 
+ #include <Arduino.h>
+@@ -75,6 +76,11 @@
+   return (bbInventoryMode() == BB_INV_SPOOLMAN) && bbSpoolmanUrl()[0];
+ }
+ 
++// sdfp fork: the scan sounds (services/sound.h), in SoundVolume order.
++static const uint16_t OPT_SOUND[] = {
++  STR_OFF, STR_SOUND_LOW, STR_SOUND_MEDIUM, STR_SOUND_HIGH
++};
++
+ static const uint16_t OPT_BB_DRIED[] = {
+   STR_BB_DRIED_OFF, STR_BB_DRIED_SPOOLMAN, STR_BB_DRIED_NOTE
+ };
+@@ -132,6 +138,14 @@
+   // has a second slot of its own since 1.3.1. It therefore heads the list in
+   // FilaMan mode too, which is where it belongs: it is about linking, and
+   // everything below it is about weighing.
++  // sdfp fork: a sound for each scan - found, unknown, linked - through the
++  // board's speaker. Stepped through on the device, a choice on the web; a
++  // change plays a preview at the new volume.
++  { "sound_vol", SET_ENUM, SC_ALL, &g_sound_volume,
++    STR_SOUND, 0, STR_SOUND_INFO, LV_SYMBOL_AUDIO,
++    SOUND_MEDIUM, SOUND_VOLUME_COUNT, OPT_SOUND,
++    nullptr, nullptr, soundVolumeChanged, OPEN_NONE, nullptr, false },
++
+   { "tag2_ask", SET_BOOL, SC_ALL, &g_tag2_ask,
+     STR_TAG2_ASK, STR_TAG2_ASK_SUB, STR_TAG2_ASK_INFO, LV_SYMBOL_COPY,
+     0, 0, nullptr,
+diff -ruN a/src/services/sound.cpp b/src/services/sound.cpp
+--- a/src/services/sound.cpp	1970-01-01 01:00:00
++++ b/src/services/sound.cpp	2026-11-01 14:48:16
+@@ -0,0 +1,153 @@
++#include "services/sound.h"
++
++#include <Arduino.h>
++#include <driver/i2s_std.h>
++#include <math.h>
++#include <string.h>
++
++#include "hardware/sd_logger.h"
++
++// Not in hardware/pins.h on purpose: nothing else touches these, and the
++// variant header is the source (variants/wt32-sc01-plus/pins_arduino.h).
++#define SOUND_PIN_LRCK  35
++#define SOUND_PIN_BCLK  36
++#define SOUND_PIN_DOUT  37
++
++#define SOUND_RATE      16000
++#define SOUND_RAMP_MS   4      // fade in and out: no click at either end
++#define SOUND_REPEAT_MS 4000   // the same tag again within this stays quiet
++
++uint8_t g_sound_volume = SOUND_MEDIUM;
++
++// Peak amplitude per volume step, of 32767. The NS4168 has no volume control
++// of its own, so the samples are the volume.
++static const int16_t PEAK[SOUND_VOLUME_COUNT] = {0, 2500, 7000, 16000};
++
++struct Note { uint16_t hz; uint16_t ms; };  // hz 0 = a pause
++
++static const Note TUNE_FOUND[]   = {{1760, 70}};
++static const Note TUNE_UNKNOWN[] = {{440, 90}, {0, 70}, {440, 90}};
++static const Note TUNE_LINKED[]  = {{1319, 80}, {0, 15}, {1760, 130}};
++
++static QueueHandle_t s_queue = nullptr;
++
++static void writeNote(i2s_chan_handle_t tx, const Note& n, int16_t peak) {
++  const uint32_t frames = (uint32_t)SOUND_RATE * n.ms / 1000;
++  const uint32_t ramp = (uint32_t)SOUND_RATE * SOUND_RAMP_MS / 1000;
++  int16_t buf[128 * 2];  // stereo frames: both channels the same, whatever the amp listens to
++  float phase = 0.0f;
++  const float step = 2.0f * (float)M_PI * n.hz / SOUND_RATE;
++  for (uint32_t done = 0; done < frames;) {
++    const uint32_t chunk = min<uint32_t>(128, frames - done);
++    for (uint32_t i = 0; i < chunk; i++) {
++      const uint32_t f = done + i;
++      float env = 1.0f;
++      if (f < ramp) env = (float)f / ramp;
++      else if (frames - 1 - f < ramp) env = (float)(frames - 1 - f) / ramp;  // last frame: 0
++      const int16_t v = n.hz ? (int16_t)(sinf(phase) * peak * env) : 0;
++      phase += step;
++      if (phase > 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
++      buf[2 * i] = v;
++      buf[2 * i + 1] = v;
++    }
++    size_t written = 0;
++    i2s_channel_write(tx, buf, chunk * 2 * sizeof(int16_t), &written, portMAX_DELAY);
++    done += chunk;
++  }
++}
++
++// The ESP-IDF standard-mode driver directly rather than the Arduino I2SClass:
++// that wrapper also links the PDM and TDM modes, and with them ~30 kB more than
++// a speaker needs - enough to push the image past the 3 MB app slot that devices
++// flashed with the older partition table still have.
++static void playTune(const Note* notes, size_t count, int16_t peak) {
++  i2s_chan_handle_t tx = nullptr;
++  i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
++  chan.auto_clear = true;  // the DMA plays silence, not the last buffer, once drained
++  if (i2s_new_channel(&chan, &tx, nullptr) != ESP_OK) {
++    logSD("Sound: no I2S channel");
++    return;
++  }
++  i2s_std_config_t std = {
++    .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SOUND_RATE),
++    .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
++    .gpio_cfg = {
++      .mclk = I2S_GPIO_UNUSED,
++      .bclk = (gpio_num_t)SOUND_PIN_BCLK,
++      .ws   = (gpio_num_t)SOUND_PIN_LRCK,
++      .dout = (gpio_num_t)SOUND_PIN_DOUT,
++      .din  = I2S_GPIO_UNUSED,
++      .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
++    },
++  };
++  if (i2s_channel_init_std_mode(tx, &std) != ESP_OK || i2s_channel_enable(tx) != ESP_OK) {
++    logSD("Sound: I2S would not start");
++    i2s_del_channel(tx);
++    return;
++  }
++  for (size_t i = 0; i < count; i++) writeNote(tx, notes[i], peak);
++  // Silence behind the tune, so the DMA has played the last note out before
++  // the peripheral is released.
++  const Note tail = {0, 40};
++  writeNote(tx, tail, 0);
++  i2s_channel_disable(tx);
++  i2s_del_channel(tx);
++}
++
++static void soundTask(void*) {
++  uint8_t id;
++  for (;;) {
++    if (xQueueReceive(s_queue, &id, portMAX_DELAY) != pdTRUE) continue;
++    const uint8_t vol = g_sound_volume;
++    if (vol == SOUND_OFF || vol >= SOUND_VOLUME_COUNT) continue;
++    switch (id) {
++      case SND_TAG_FOUND:   playTune(TUNE_FOUND, 1, PEAK[vol]); break;
++      case SND_TAG_UNKNOWN: playTune(TUNE_UNKNOWN, 3, PEAK[vol]); break;
++      case SND_TAG_LINKED:  playTune(TUNE_LINKED, 3, PEAK[vol]); break;
++      default: break;
++    }
++  }
++}
++
++void soundPlay(SoundId id) {
++  if (g_sound_volume == SOUND_OFF) return;
++  if (!s_queue) {
++    // First sound: the queue and the task. Core 0, beside the backend and web
++    // jobs; low priority, a beep can wait a moment.
++    s_queue = xQueueCreate(4, sizeof(uint8_t));
++    if (!s_queue) return;
++    if (xTaskCreatePinnedToCore(soundTask, "sound", 3072, nullptr, 1, nullptr, 0) != pdPASS) {
++      logSD("Sound: task would not start");
++      return;
++    }
++  }
++  const uint8_t v = (uint8_t)id;
++  xQueueSend(s_queue, &v, 0);  // full: dropped, never waited for
++}
++
++static char s_last_uid[40] = "";
++static uint32_t s_last_ms = 0;
++static char s_expect_link[40] = "";
++
++void soundExpectLink(const char* uid) {
++  snprintf(s_expect_link, sizeof(s_expect_link), "%s", uid ? uid : "");
++}
++
++void soundTagVerdict(const char* uid, bool found) {
++  const char* u = uid ? uid : "";
++  const uint32_t now = millis();
++  if (u[0] && !strcmp(u, s_last_uid) && now - s_last_ms < SOUND_REPEAT_MS) return;
++  snprintf(s_last_uid, sizeof(s_last_uid), "%s", u);
++  s_last_ms = now;
++  if (!found && u[0] && !strcmp(u, s_expect_link)) return;  // the chime follows
++  soundPlay(found ? SND_TAG_FOUND : SND_TAG_UNKNOWN);
++}
++
++void soundTagLinked() {
++  s_expect_link[0] = 0;
++  soundPlay(SND_TAG_LINKED);
++}
++
++void soundVolumeChanged() {
++  soundPlay(SND_TAG_FOUND);
++}
+diff -ruN a/src/services/sound.h b/src/services/sound.h
+--- a/src/services/sound.h	1970-01-01 01:00:00
++++ b/src/services/sound.h	2026-11-01 14:48:16
+@@ -0,0 +1,56 @@
++#pragma once
++// ============================================================
++//  sound.h - short sounds through the board's speaker
++//  sdfp fork addition
++// ============================================================
++//
++// The WT32-SC01 Plus has an NS4168 I2S amplifier and a two pin speaker
++// connector (SPK): LRCK GPIO 35, BCLK GPIO 36, DOUT GPIO 37, as the Arduino
++// core's own variant for the board names them. An 8 ohm speaker plugs in.
++//
++// What a scan sounds like:
++//   SND_TAG_FOUND    the tag belongs to a known spool        one short high beep
++//   SND_TAG_UNKNOWN  no spool has this tag                   two low beeps
++//   SND_TAG_LINKED   a tag was just linked to a spool        a rising two tone chime
++//
++// soundPlay() only queues: a small task on core 0 drives the I2S peripheral,
++// so neither the loop (NFC, scale, LVGL) nor a web handler ever waits on it.
++// The peripheral is set up per sound and released after, so an idle speaker
++// does not hiss.
++
++#include <stdint.h>
++
++enum SoundId : uint8_t {
++  SND_TAG_FOUND = 0,
++  SND_TAG_UNKNOWN,
++  SND_TAG_LINKED,
++};
++
++// The setting (NVS key "sound_vol", in the settings registry).
++enum SoundVolume : uint8_t {
++  SOUND_OFF = 0,
++  SOUND_LOW,
++  SOUND_MEDIUM,
++  SOUND_HIGH,
++  SOUND_VOLUME_COUNT
++};
++extern uint8_t g_sound_volume;
++
++// Queues a sound. Does nothing with the volume off; drops it when sounds are
++// already queued up. Safe from any task, including LVGL callbacks.
++void soundPlay(SoundId id);
++
++// The verdict of a tag lookup: found or unknown, once per tag - the same tag
++// within a few seconds (one that wobbles in and out of the field, a repeat
++// lookup) stays quiet. An unknown tag that is about to be linked by its spool
++// URL stays quiet too: the chime follows when the link is done.
++void soundTagVerdict(const char* uid, bool found);
++
++// Marks the tag a link was just parked for (services/spool_url.cpp).
++void soundExpectLink(const char* uid);
++
++// A tag was linked to a spool: the chime.
++void soundTagLinked();
++
++// The settings row's on_change: a preview at the new volume.
++void soundVolumeChanged();
+diff -ruN a/src/services/spool_url.cpp b/src/services/spool_url.cpp
+--- a/src/services/spool_url.cpp	1970-01-01 01:00:00
++++ b/src/services/spool_url.cpp	2026-11-01 14:48:16
+@@ -0,0 +1,141 @@
++#include "services/spool_url.h"
++
++#include <Arduino.h>
++#include <ArduinoJson.h>
++#include <ctype.h>
++#include <esp_heap_caps.h>
++#include <stdio.h>
++#include <string.h>
++
++#include "app/app_state.h"
++#include "hardware/sd_logger.h"
++#include "services/backend.h"
++#include "services/sound.h"
++#include "services/spoolman_api.h"
++#include "services/tag_link.h"
++#include "services/tag_write.h"
++
++#define SPOOL_URL_TIMEOUT_MS  5000
++// How long a parked link keeps the unknown-spool card away (spoolUrlLinkExpected).
++#define SPOOL_URL_EXPECT_MS   15000
++
++// Defined locally in every .cpp that needs it, as everywhere else in this
++// project.
++namespace {
++struct SpiRamAllocator : ArduinoJson::Allocator {
++  void* allocate(size_t size) override {
++    void* ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
++    if (!ptr) ptr = malloc(size);
++    return ptr;
++  }
++  void deallocate(void* pointer) override { heap_caps_free(pointer); }
++  void* reallocate(void* ptr, size_t new_size) override {
++    void* p = heap_caps_realloc(ptr, new_size, MALLOC_CAP_SPIRAM);
++    if (!p) p = realloc(ptr, new_size);
++    return p;
++  }
++};
++}
++
++static bool startsWith(const char* s, const char* prefix) {
++  return strncasecmp(s, prefix, strlen(prefix)) == 0;
++}
++
++bool spoolUrlShortCode(const char* url, char* code, size_t code_len) {
++  if (!code || !code_len) return false;
++  code[0] = 0;
++  const char* p = url ? url : "";
++  if (startsWith(p, "https://")) p += 8;
++  else if (startsWith(p, "http://")) p += 7;
++  if (startsWith(p, "www.")) p += 4;
++
++  // The paths a spool's QR code or tag can carry: the detail page (/s/), the
++  // edit page (/se/, the site's label default), and the long forms.
++  const char* rest = nullptr;
++  if (startsWith(p, "spooldb.com/s/"))       rest = p + 14;
++  else if (startsWith(p, "spooldb.com/se/")) rest = p + 15;
++  else if (startsWith(p, "3dfilamentprofiles.com/my/spool/")) rest = p + 32;
++  if (!rest) return false;
++
++  size_t n = 0;
++  while (rest[n] && (isalnum((unsigned char)rest[n]) || rest[n] == '-' || rest[n] == '_')) n++;
++  // What may follow the code: nothing, a slash, /edit, a query, a fragment.
++  const char* tail = rest + n;
++  if (*tail && *tail != '/' && *tail != '?' && *tail != '#') return false;
++  if (!n || n >= code_len) return false;
++  memcpy(code, rest, n);
++  code[n] = 0;
++  return true;
++}
++
++int spoolUrlFindSpool(const char* code) {
++  if (!code || !code[0]) return 0;
++  // Only the two fields compared, so even a server without the filter - which
++  // then answers with the whole inventory - stays a small document.
++  JsonDocument filter;
++  filter[0]["id"] = true;
++  filter[0]["extra"]["sdfp_short_code"] = true;
++  SpiRamAllocator alloc;
++  JsonDocument doc(&alloc);
++  const int http = spoolmanFindSpoolByExtraField(backendBaseUrl(), "sdfp_short_code", code,
++                                                 doc, SPOOL_URL_TIMEOUT_MS, &filter, nullptr);
++  if (http != 200) return -1;
++  // The filter is a partial, case insensitive match on the server, and short
++  // codes are case sensitive: "abc" must not find "ABCd". Compare exactly.
++  char want[32];
++  snprintf(want, sizeof(want), "\"%s\"", code);  // extra values are JSON encoded
++  for (JsonObjectConst sp : doc.as<JsonArrayConst>()) {
++    const char* v = sp["extra"]["sdfp_short_code"] | "";
++    if (!strcmp(v, want) || !strcmp(v, code)) return sp["id"] | 0;
++  }
++  return 0;
++}
++
++static int s_auto_spool_id = 0;  // the spool our last parked link is for
++static char s_auto_uid[40] = "";  // and the tag it links
++static uint32_t s_auto_ms = 0;
++
++bool spoolUrlTakeAutoLink(int spool_id) {
++  const bool ours = spool_id > 0 && spool_id == s_auto_spool_id;
++  if (ours) {
++    s_auto_spool_id = 0;
++    s_auto_uid[0] = 0;
++  }
++  return ours;
++}
++
++bool spoolUrlLinkExpected(const char* uid) {
++  return s_auto_spool_id > 0 && uid && uid[0] && !strcmp(uid, s_auto_uid) &&
++         millis() - s_auto_ms < SPOOL_URL_EXPECT_MS;
++}
++
++void spoolUrlAfterLookup() {
++  if (backendMode() != BACKEND_SPOOLMAN) return;
++  const TagInfo* ti = tagCachedInfo();
++  if (!ti || !ti->spool_code[0]) return;
++  if (sm_found && sm_id > 0) return;  // known already: nothing to do, no request
++  const char* uid = tagCachedUid();
++  if (!uid || !uid[0]) return;
++
++  const int id = spoolUrlFindSpool(ti->spool_code);
++  if (id < 0) {
++    logSDf("SpoolURL: tag %s names spool code %s, Spoolman did not answer", uid,
++           ti->spool_code);
++    return;
++  }
++  if (id == 0) {
++    logSDf("SpoolURL: tag %s names spool code %s, no Spoolman spool has it", uid,
++           ti->spool_code);
++    return;
++  }
++  if (tagLinkRequest(id, uid)) {
++    soundExpectLink(uid);
++    s_auto_spool_id = id;
++    snprintf(s_auto_uid, sizeof(s_auto_uid), "%s", uid);
++    s_auto_ms = millis();
++    logSDf("SpoolURL: tag %s names spool code %s -> linking to spool #%d", uid,
++           ti->spool_code, id);
++  } else {
++    logSDf("SpoolURL: tag %s -> spool #%d, but a link is already waiting", uid, id);
++  }
++}
+diff -ruN a/src/services/spool_url.h b/src/services/spool_url.h
+--- a/src/services/spool_url.h	1970-01-01 01:00:00
++++ b/src/services/spool_url.h	2026-11-01 14:48:16
+@@ -0,0 +1,44 @@
++#pragma once
++// ============================================================
++//  spool_url.h - tags that carry the spool's page URL
++//  sdfp fork addition (SPOOLMANSCALE-SDFP.md, section 4, option C)
++// ============================================================
++//
++// 3dfilamentprofiles.com gives every spool a short code and a page,
++// https://spooldb.com/s/<code>. A tag with that URL as an NDEF URI record -
++// written by a phone, or by the scale's "Spool URL" formats - names its spool
++// by itself. The sdfp import puts the same code on the Spoolman spool, as the
++// extra field sdfp_short_code.
++//
++// So a tag the scale does not know yet, but whose URL names a spool, is linked
++// to that spool on the spot instead of waiting for someone to pick it from the
++// list. Only then: a tag that is already linked costs no request, and a tag
++// another spool holds is never taken from it (tagLinkRequest() refuses).
++
++#include <stddef.h>
++
++// The short code in a spool URL - spooldb.com/s/<code>, /se/<code>, or
++// 3dfilamentprofiles.com/my/spool/<code>[/edit], with or without scheme or www.
++// False, and code empty, for anything else (a filament or location page too).
++bool spoolUrlShortCode(const char* url, char* code, size_t code_len);
++
++// The Spoolman spool carrying this short code in extra.sdfp_short_code, by an
++// exact comparison. 0 when there is none, -1 when the server did not answer.
++// Blocking: from appLoop() only.
++int spoolUrlFindSpool(const char* code);
++
++// From appLoop(), right after the lookup of a freshly scanned NTAG. If the tag
++// carries a spool URL and the lookup found no spool for it, parks a link of the
++// tag to the spool the URL names (tagLinkRequest, which waits for a lookup still
++// running and refuses a tag held elsewhere). Does nothing outside Spoolman mode.
++void spoolUrlAfterLookup();
++
++// Whether a link that just completed for this spool was one spoolUrlAfterLookup()
++// parked; true once. The loop then follows it with the tag write a link from the
++// list would get (spoolFlowTagWriteAfterLink).
++bool spoolUrlTakeAutoLink(int spool_id);
++
++// Whether spoolUrlAfterLookup() just parked a link for this tag (within the
++// last 15 s, not yet taken): the "unknown spool" card stays away, the link
++// answers the question it would ask.
++bool spoolUrlLinkExpected(const char* uid);
+diff -ruN a/src/services/tag_link.cpp b/src/services/tag_link.cpp
+--- a/src/services/tag_link.cpp	2026-11-01 14:33:00
++++ b/src/services/tag_link.cpp	2026-11-01 14:48:16
+@@ -201,7 +201,8 @@
+ 
+   // What doLinkPatch() does after its write, so the next list and the next
+   // lookup know the tag the way the device's own link would have left them.
+-  if (!tagFieldSelected().is_native) spoolCacheSetBound(id, true);
++  // Native tags too, now that spoolHasAnyTag() sees them (sdfp fork fix).
++  spoolCacheSetBound(id, true);
+   const char* linked[3] = { value, tagNativeUid(value), g_tag.uid_str };
+   uidIndexNote(linked, 3);
+   return TL_OK;
+diff -ruN a/src/services/tag_write.cpp b/src/services/tag_write.cpp
+--- a/src/services/tag_write.cpp	2026-11-01 14:33:00
++++ b/src/services/tag_write.cpp	2026-11-01 14:48:16
+@@ -17,6 +17,7 @@
+ #include "services/backend.h"
+ #include "services/backend_api.h"
+ #include "services/filaman_api.h"
++#include "services/spool_url.h"
+ #include "services/tag_field.h"
+ #include "services/tag_link.h"
+ #include "services/tag_uid.h"
+@@ -102,6 +103,13 @@
+          cached_info.fmt[0] && strcmp(cached_info.fmt, "blank") != 0 &&
+          strcmp(cached_info.fmt, "unknown") != 0;
+ }
++TagFormat tagWriteFormatFor(uint8_t configured) {
++  const bool url = cached_kindcode == TAG_KIND_NTAG && cached_info.spool_code[0];
++  if (url && (configured == TAG_FMT_OPENSPOOL || configured == TAG_FMT_FILAMAN))
++    return TAG_FMT_URL_OPENSPOOL;
++  return (TagFormat)configured;
++}
++
+ void tagScanRequest() { scan_pending = true; scan_since = millis(); }
+ 
+ const TagWriteReport* tagWriteReportData() { return &report; }
+@@ -334,6 +342,10 @@
+     jesc(ti->material, e, sizeof(e));
+     n = appendf(out, out_len, n, ",\"material\":\"%s\"", e);
+   }
++  if (ti->spool_code[0]) {  // sdfp fork
++    jesc(ti->spool_code, e, sizeof(e));
++    n = appendf(out, out_len, n, ",\"spool_code\":\"%s\"", e);
++  }
+   if (ti->spool_id > 0) n = appendf(out, out_len, n, ",\"spool_id\":%d", ti->spool_id);
+   if (ti->proto[0]) {
+     jesc(ti->proto, e, sizeof(e));
+@@ -515,37 +527,62 @@
+ }
+ 
+ 
+-// NDEF on an NTAG: TLV 0x03, length, one application/json record, 0xFE.
+-// Record header D2 = MB|ME|SR, TNF 2 (media type).
++// NDEF on an NTAG: TLV 0x03, length, the NDEF message, 0xFE. The message is
++// one application/json record (header D2 = MB|ME|SR, TNF 2, media type), or -
++// sdfp fork - a URI record (TNF 1, type "U"), or a URI record followed by the
++// JSON one.
+ //
+-// The single byte TLV length field is what caps the payload, not the tag: past
+-// 255 total the TLV would need its three byte form, which nothing here writes.
++// The JSON payload stays capped at 250 so the plain OpenSpool record keeps its
++// one byte TLV length, byte for byte what this firmware always wrote. A URI and
++// a JSON record together can pass 254, and then the TLV takes its three byte
++// form (0xFF, length high, length low), which readOpenSpool() reads as well.
+ #define NDEF_JSON_MAX 250
++#define NDEF_MSG_MAX  320
+ 
+-// TLV tag and length, record header with type and payload length, the media
+-// type itself, the payload, the terminator - then rounded up to whole 4 byte
+-// pages, because that is the unit a write goes in.
+-size_t tagNdefSizeFor(size_t json_len) {
+-  const size_t n = 2 + 3 + 16 + json_len + 1;
++// The TLV around a message of msg_len bytes, the terminator, and rounding up to
++// whole 4 byte pages, because that is the unit a write goes in.
++static size_t ndefTlvSize(size_t msg_len) {
++  const size_t n = (msg_len <= 254 ? 2 : 4) + msg_len + 1;
+   return n + ((4 - (n % 4)) % 4);
+ }
+ 
++// The plain OpenSpool record: header, type length, payload length, the media
++// type, the payload.
++size_t tagNdefSizeFor(size_t json_len) {
++  return ndefTlvSize(3 + 16 + json_len);
++}
++
+ static char    write_err[80] = "";
+ static uint8_t write_code = TW_ERR_WRITE;
+ static char    remote_payload[320] = "";
+ static char    remote_proto[12] = "";
+ 
+-// Wraps a JSON document in the NDEF TLV an OpenSpool reader expects.
+-static bool writeNdefJson(const char *json) {
+-  const int n = (int)strlen(json);
+-  if (n <= 0 || n > NDEF_JSON_MAX) return false;
++static const char NDEF_JSON_TYPE[] = "application/json";
++#define NDEF_MB 0x80
++#define NDEF_ME 0x40
++#define NDEF_SR 0x10
+ 
+-  static const char TYPE[] = "application/json";
+-  const uint8_t tlen = sizeof(TYPE) - 1;
++// One short record into out at *at. False when it would not fit `cap`.
++static bool ndefRecord(uint8_t *out, size_t cap, size_t *at, uint8_t flags, uint8_t tnf,
++                       const char *type, const uint8_t *payload, size_t plen) {
++  const size_t tlen = strlen(type);
++  if (plen > 255 || tlen > 255 || *at + 3 + tlen + plen > cap) return false;
++  out[(*at)++] = (uint8_t)(flags | NDEF_SR | tnf);
++  out[(*at)++] = (uint8_t)tlen;
++  out[(*at)++] = (uint8_t)plen;
++  memcpy(out + *at, type, tlen);    *at += tlen;
++  memcpy(out + *at, payload, plen); *at += plen;
++  return true;
++}
+ 
++// Writes an NDEF message - one or more records, already laid out - wrapped in
++// its TLV. `what` names the content in the "needs N bytes" message.
++static bool writeNdefMessage(const uint8_t *msg, size_t msg_len, const char *what) {
++  if (!msg_len || msg_len > NDEF_MSG_MAX) return false;
++
+   // Settled before a single byte is laid out: the same arithmetic the preview
+   // uses, so a tag the page called too small is exactly the one that fails here.
+-  const int i_need = (int)tagNdefSizeFor((size_t)n);
++  const int i_need = (int)ndefTlvSize(msg_len);
+   {
+     const uint8_t need_last = (uint8_t)(4 + (i_need + 3) / 4 - 1);
+     const uint8_t last = lastUserPage();
+@@ -560,22 +597,24 @@
+                  "Tag reports no size. Format it as NDEF once, then retry");
+       else
+         snprintf(write_err, sizeof(write_err),
+-                 "OpenSpool needs %d bytes, this tag holds %u", i_need,
++                 "%s needs %d bytes, this tag holds %u", what, i_need,
+                  (unsigned)((last - 3) * 4));
+       write_code = TW_ERR_SPACE;
+       return false;
+     }
+   }
+ 
+-  uint8_t buf[288];
++  uint8_t buf[NDEF_MSG_MAX + 8];
+   int i = 0;
+   buf[i++] = 0x03;                       // NDEF message TLV
+-  buf[i++] = (uint8_t)(3 + tlen + n);    // record header + type + payload
+-  buf[i++] = 0xD2;
+-  buf[i++] = tlen;
+-  buf[i++] = (uint8_t)n;
+-  memcpy(buf + i, TYPE, tlen); i += tlen;
+-  memcpy(buf + i, json, n);    i += n;
++  if (msg_len <= 254) {
++    buf[i++] = (uint8_t)msg_len;
++  } else {
++    buf[i++] = 0xFF;                     // three byte length form
++    buf[i++] = (uint8_t)(msg_len >> 8);
++    buf[i++] = (uint8_t)(msg_len & 0xFF);
++  }
++  memcpy(buf + i, msg, msg_len); i += (int)msg_len;
+   buf[i++] = 0xFE;                       // terminator
+   while (i % 4) buf[i++] = 0x00;
+ 
+@@ -603,6 +642,63 @@
+   return true;
+ }
+ 
++// Wraps a JSON document in the NDEF TLV an OpenSpool reader expects.
++static bool writeNdefJson(const char *json) {
++  const size_t n = strlen(json);
++  if (!n || n > NDEF_JSON_MAX) return false;
++  uint8_t msg[NDEF_MSG_MAX];
++  size_t at = 0;
++  if (!ndefRecord(msg, sizeof(msg), &at, NDEF_MB | NDEF_ME, 0x02, NDEF_JSON_TYPE,
++                  (const uint8_t *)json, n)) return false;
++  return writeNdefMessage(msg, at, "OpenSpool");
++}
++
++// ---- sdfp fork: the spool URL -----------------------------------------------
++// URI record payload: an identifier code standing for the scheme (0x04 is
++// "https://", NFC Forum URI RTD), then the rest. Exactly what a phone writes
++// for https://spooldb.com/s/<code>, so tags from either reader look the same.
++#define SPOOL_URL_REST "spooldb.com/s/"
++
++// The URI record payload for a short code into out; its length, 0 if invalid.
++static size_t spoolUrlPayload(const char *code, uint8_t *out, size_t cap) {
++  const size_t clen = strlen(code);
++  const size_t n = 1 + strlen(SPOOL_URL_REST) + clen;
++  if (!clen || clen > 20 || n > cap) return 0;
++  for (const char *c = code; *c; c++)
++    if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_') return 0;
++  out[0] = 0x04;
++  memcpy(out + 1, SPOOL_URL_REST, strlen(SPOOL_URL_REST));
++  memcpy(out + 1 + strlen(SPOOL_URL_REST), code, clen);
++  return n;
++}
++
++// The message a URL format writes: the URI record, then for URL + OpenSpool
++// the JSON record. Its length, 0 when it could not be laid out.
++static size_t buildUrlMessage(const char *code, const char *json, uint8_t *msg, size_t cap) {
++  uint8_t uri[48];
++  const size_t ulen = spoolUrlPayload(code, uri, sizeof(uri));
++  if (!ulen) return 0;
++  size_t at = 0;
++  const bool both = json && json[0];
++  if (!ndefRecord(msg, cap, &at, NDEF_MB | (both ? 0 : NDEF_ME), 0x01, "U", uri, ulen))
++    return 0;
++  if (both && !ndefRecord(msg, cap, &at, NDEF_ME, 0x02, NDEF_JSON_TYPE,
++                          (const uint8_t *)json, strlen(json))) return 0;
++  return at;
++}
++
++// The spool's sdfp short code: extra.sdfp_short_code, which arrives JSON
++// encoded and still in its quotes. "" when the spool has none.
++static void spoolShortCode(JsonObjectConst sp, char *out, size_t out_len) {
++  out[0] = 0;
++  const char *s = sp["extra"]["sdfp_short_code"] | "";
++  size_t len = strlen(s);
++  if (len >= 2 && s[0] == '"' && s[len - 1] == '"') { s++; len -= 2; }
++  if (len >= out_len) len = out_len - 1;
++  memcpy(out, s, len);
++  out[len] = 0;
++}
++
+ // Two names for the same number, because two readers look for two different
+ // keys. sm_id is the OpenSpool convention this firmware has always written and
+ // what OpenSpoolman resolves. spool_id is what FilaMan's own reader looks for -
+@@ -611,9 +707,11 @@
+ // What the format is called where a person reads it.
+ static const char* fmtLabel(TagFormat fmt) {
+   switch (fmt) {
+-    case TAG_FMT_ACE:     return "ACE";
+-    case TAG_FMT_FILAMAN: return "FilaMan";
+-    default:              return "OpenSpool";
++    case TAG_FMT_ACE:           return "ACE";
++    case TAG_FMT_FILAMAN:       return "FilaMan";
++    case TAG_FMT_URL:           return "Spool URL";
++    case TAG_FMT_URL_OPENSPOOL: return "URL + OpenSpool";
++    default:                    return "OpenSpool";
+   }
+ }
+ 
+@@ -626,6 +724,8 @@
+     case TAG_FMT_ACE:       return "Anycubic ACE";
+     case TAG_FMT_FILAMAN:   return "FilaMan";
+     case TAG_FMT_ERASE:     return "erase";
++    case TAG_FMT_URL:       return "Spool URL";
++    case TAG_FMT_URL_OPENSPOOL: return "URL + OpenSpool";
+     default:                return "OpenSpool";
+   }
+ }
+@@ -648,6 +748,31 @@
+   return writeNdefJson(json);
+ }
+ 
++// sdfp fork: the spool URL, alone or ahead of the OpenSpool record. The short
++// code comes from the spool itself - sdfp_spoolman.py puts it there on import.
++static bool writeSpoolUrl(JsonObjectConst sp, const AceFields *f, int spool_id,
++                          TagFormat fmt) {
++  char code[24];
++  spoolShortCode(sp, code, sizeof(code));
++  if (!code[0]) {
++    snprintf(write_err, sizeof(write_err),
++             "Spool %d has no sdfp short code - import it with sdfp first", spool_id);
++    write_code = TW_ERR_BACKEND;
++    return false;
++  }
++  char json[224] = "";
++  if (fmt == TAG_FMT_URL_OPENSPOOL &&
++      !buildOpenSpoolJson(f, spool_id, TAG_FMT_OPENSPOOL, json, sizeof(json))) return false;
++  uint8_t msg[NDEF_MSG_MAX];
++  const size_t n = buildUrlMessage(code, json, msg, sizeof(msg));
++  if (!n) {
++    snprintf(write_err, sizeof(write_err), "Spool code '%s' cannot go in a URL", code);
++    write_code = TW_ERR_BACKEND;
++    return false;
++  }
++  return writeNdefMessage(msg, n, fmtLabel(fmt));
++}
++
+ // What the server sent is kept exactly as it sent it - spool_id included. An
+ // earlier version swapped that key for sm_id on the way through, on the theory
+ // that sm_id was the one a reader needs. It is not: sm_id is this firmware's
+@@ -733,29 +858,84 @@
+   return !strcmp(proto, "openspool") || !strcmp(proto, "filaman");
+ }
+ 
+-// Reads the JSON payload back out of the NDEF wrapper.
+-static bool readOpenSpool(char *out, size_t out_len) {
++// URI identifier codes 0x00-0x04 (NFC Forum URI RTD), the ones in real use.
++static const char *const URI_PREFIX[] = {
++  "", "http://www.", "https://www.", "http://", "https://"
++};
++
++// Reads the NDEF message back and walks its records. The JSON payload goes to
++// out (the OpenSpool record; or, as before, a first record nothing claims, so
++// the raw view can show it), and - sdfp fork - the short code of a spooldb.com
++// spool URL to code. True when out holds a supported OpenSpool/FilaMan record.
++static bool readOpenSpool(char *out, size_t out_len, char *code, size_t code_len) {
++  out[0] = 0;
++  if (code && code_len) code[0] = 0;
+   // Zeroed: only the pages the TLV claims are read, and a record that says it
+   // reaches past them must copy zeros, not whatever the stack held before.
+-  uint8_t buf[240] = {0};
++  uint8_t buf[NDEF_MSG_MAX + 8] = {0};
+   if (!nfcReadNtagPage(4, buf)) return false;
+   if (buf[0] != 0x03) return false;          // not an NDEF TLV, stop here
+-  int len = buf[1];
+-  const int need = 2 + len;
++  int hdr = 2, len = buf[1];
++  if (len == 0xFF) {                         // three byte length form
++    hdr = 4;
++    len = (buf[2] << 8) | buf[3];
++  }
++  const int need = hdr + len;
+   const int pages = (need + 3) / 4;
+   if (pages > (int)sizeof(buf) / 4) return false;
+   for (int p2 = 1; p2 < pages; p2++)
+     if (!nfcReadNtagPage((uint8_t)(4 + p2), buf + p2 * 4)) return false;
+-  if (len < 5 || 2 + len > (int)sizeof(buf)) return false;
+-  int tlen = buf[3];
+-  int plen = buf[4];
+-  int start = 5 + tlen;
+-  // Within what was read (2 + len), not merely within the buffer.
+-  if (plen <= 0 || start + plen > 2 + len) return false;
+-  size_t copy = (size_t)plen < out_len - 1 ? (size_t)plen : out_len - 1;
+-  memcpy(out, buf + start, copy);
+-  out[copy] = 0;
+-  return isSupportedRecord(out);
++  if (len < 3) return false;
++
++  bool supported = false;
++  bool first = true;
++  int p = hdr;
++  const int end = hdr + len;   // within what was read, not merely within the buffer
++  while (p + 3 <= end) {
++    const uint8_t h = buf[p];
++    const uint8_t tnf = h & 0x07;
++    const bool sr = h & NDEF_SR, il = h & 0x08, chunk = h & 0x20;
++    int q = p + 1;
++    const int tlen = buf[q++];
++    int plen;
++    if (sr) {
++      plen = buf[q++];
++    } else {
++      if (q + 4 > end) break;
++      plen = (buf[q] << 24) | (buf[q + 1] << 16) | (buf[q + 2] << 8) | buf[q + 3];
++      q += 4;
++    }
++    const int idlen = il ? buf[q++] : 0;
++    const int type_at = q, pay_at = q + tlen + idlen;
++    if (plen < 0 || pay_at + plen > end) break;
++    if (!chunk) {
++      if (tnf == 0x01 && tlen == 1 && buf[type_at] == 'U' && plen >= 1 && code && code_len &&
++          !code[0]) {
++        char url[96];
++        const uint8_t id = buf[pay_at];
++        snprintf(url, sizeof(url), "%s%.*s", id < 5 ? URI_PREFIX[id] : "",
++                 plen - 1, (const char *)buf + pay_at + 1);
++        spoolUrlShortCode(url, code, code_len);
++      } else if (tnf == 0x02 && tlen == 16 && !memcmp(buf + type_at, NDEF_JSON_TYPE, 16) &&
++                 !supported) {
++        size_t copy = (size_t)plen < out_len - 1 ? (size_t)plen : out_len - 1;
++        memcpy(out, buf + pay_at, copy);
++        out[copy] = 0;
++        supported = isSupportedRecord(out);
++      } else if (first && !out[0] && plen > 0) {
++        // Not a record anything here reads: kept for the raw view, as the
++        // reader always did with a first record.
++        size_t copy = (size_t)plen < out_len - 1 ? (size_t)plen : out_len - 1;
++        memcpy(out, buf + pay_at, copy);
++        out[copy] = 0;
++      }
++    }
++    first = false;
++    p = pay_at + plen;
++    if (h & NDEF_ME) break;
++  }
++  if (!supported && code && code[0] && out[0] && !isSupportedRecord(out)) out[0] = 0;
++  return supported;
+ }
+ 
+ // OpenSpool carries the temperatures as JSON strings - "min_temp":"200" - and
+@@ -845,11 +1025,25 @@
+ 
+   char json[224];
+   json[0] = 0;
+-  if (readOpenSpool(json, sizeof(json))) {
++  char code[24] = "";
++  if (readOpenSpool(json, sizeof(json), code, sizeof(code))) {
+     snprintf(cached_raw, sizeof(cached_raw), "%s", json);
+     describeOpenSpool(json, out, out_len, ti);
++    if (ti) snprintf(ti->spool_code, sizeof(ti->spool_code), "%s", code);
+     return true;
+   }
++  if (code[0]) {
++    // sdfp fork: a tag that carries only the spool's URL.
++    snprintf(out, out_len, "Spool URL: %s", code);
++    if (ti) {
++      snprintf(ti->fmt, sizeof(ti->fmt), "Spool URL");
++      snprintf(ti->spool_code, sizeof(ti->spool_code), "%s", code);
++    }
++    snprintf(cached_raw, sizeof(cached_raw),
++             "{\"format\":\"Spool URL\",\"uid\":\"%s\",\"url\":\"https://" SPOOL_URL_REST
++             "%s\"}", g_tag.uid_str, code);
++    return true;
++  }
+   if (json[0]) {
+     snprintf(cached_raw, sizeof(cached_raw), "%s", json);
+   }
+@@ -953,6 +1147,39 @@
+   }
+   AceFields f;
+   buildAce(sp, &f);
++  if (TAG_FMT_HAS_URL(fmt)) {
++    // sdfp fork: measured on the message that would really be written.
++    char code[24];
++    spoolShortCode(sp, code, sizeof(code));
++    char json[224] = "";
++    if (fmt == TAG_FMT_URL_OPENSPOOL)
++      buildOpenSpoolJson(&f, spool_id, TAG_FMT_OPENSPOOL, json, sizeof(json));
++    uint8_t msg[NDEF_MSG_MAX];
++    const size_t n = code[0] ? buildUrlMessage(code, json, msg, sizeof(msg)) : 0;
++    if (!n) {
++      snprintf(out, out_len, "Spool URL: spool %d has no sdfp short code", spool_id);
++      return false;
++    }
++    if (need) *need = (uint16_t)ndefTlvSize(n);
++    if (info) {
++      if (fmt == TAG_FMT_URL_OPENSPOOL) {
++        // Reads back as an OpenSpool tag that also carries the URL.
++        aceToInfo(&f, info);
++        snprintf(info->fmt, sizeof(info->fmt), "OpenSpool");
++        info->sku[0] = 0;
++        info->bed_lo = info->bed_hi = 0;
++        info->dia_x100 = info->length_m = info->weight_g = 0;
++        info->spool_id = spool_id;
++        snprintf(info->proto, sizeof(info->proto), "openspool");
++        snprintf(info->version, sizeof(info->version), "1.0");
++      } else {
++        snprintf(info->fmt, sizeof(info->fmt), "Spool URL");
++      }
++      snprintf(info->spool_code, sizeof(info->spool_code), "%s", code);
++    }
++    snprintf(out, out_len, "%s: https://" SPOOL_URL_REST "%s", fmtLabel(fmt), code);
++    return true;
++  }
+   if (info) {
+     aceToInfo(&f, info);
+     if (TAG_FMT_IS_NDEF(fmt)) {
+@@ -1329,7 +1556,11 @@
+   {
+     AceFields f;
+     buildAce(sp, &f);
+-    ok = TAG_FMT_IS_NDEF(fmt) ? writeOpenSpool(&f, spool_id, fmt) : writeAce(&f);
++    if (TAG_FMT_HAS_URL(fmt)) {
++      ok = writeSpoolUrl(sp, &f, spool_id, fmt);
++    } else {
++      ok = TAG_FMT_IS_NDEF(fmt) ? writeOpenSpool(&f, spool_id, fmt) : writeAce(&f);
++    }
+   }
+ 
+   cache_dirty = true;   // the tag changed under a UID that did not
+diff -ruN a/src/services/tag_write.h b/src/services/tag_write.h
+--- a/src/services/tag_write.h	2026-11-01 14:33:00
++++ b/src/services/tag_write.h	2026-11-01 14:48:16
+@@ -11,10 +11,23 @@
+   // differs from OpenSpool in one string and nothing else. It exists so a tag
+   // can be labelled the way a FilaMan installation expects to find it.
+   TAG_FMT_FILAMAN = 3,
++  // sdfp fork: the spool's page on 3dfilamentprofiles.com as an NDEF URI record,
++  // https://spooldb.com/s/<sdfp_short_code> - what a phone opens, and what the
++  // scale reads back to link the tag by itself (services/spool_url.h).
++  TAG_FMT_URL = 4,
++  // The same URI record first, then the OpenSpool record, in one NDEF message:
++  // the phone link and what the filament managers read, on one NTAG215.
++  TAG_FMT_URL_OPENSPOOL = 5,
+ };
+ 
+-// True for the formats that go on the tag as an NDEF JSON record.
+-#define TAG_FMT_IS_NDEF(f)  ((f) == TAG_FMT_OPENSPOOL || (f) == TAG_FMT_FILAMAN)
++// True for the formats that carry the NDEF JSON record. The size floor below
++// applies to exactly these: a URI record alone fits even an NTAG213.
++#define TAG_FMT_IS_NDEF(f)  ((f) == TAG_FMT_OPENSPOOL || (f) == TAG_FMT_FILAMAN || \
++                             (f) == TAG_FMT_URL_OPENSPOOL)
++// True for the formats that carry the spool URL.
++#define TAG_FMT_HAS_URL(f)  ((f) == TAG_FMT_URL || (f) == TAG_FMT_URL_OPENSPOOL)
++// Every format the link flow may write; a persisted value outside it is reset.
++#define TAG_FMT_WRITABLE(f) ((f) == TAG_FMT_ACE || TAG_FMT_IS_NDEF(f) || TAG_FMT_HAS_URL(f))
+ 
+ // What a tag has to hold before an NDEF record is worth attempting. The record
+ // is around 150 to 190 bytes depending on how long the brand and material
+@@ -203,6 +216,8 @@
+   bool     has_color2;
+   uint8_t  r2, g2, b2;
+   int      spool_id;      // 0 if none
++  // sdfp fork: the short code of a spooldb.com spool URL on the tag, "" if none.
++  char     spool_code[24];
+   char     proto[17];     // e.g. "openspool"
+   char     version[12];   // e.g. "1.0"
+ };
+@@ -227,6 +242,14 @@
+ // that show it, but every caller of this means a record the scale wrote or
+ // can write, and the FilaMan scan answers a Bambu tag from g_tag instead.
+ bool tagCachedHasRecord();
++
++// sdfp fork: the format a write from the scale uses for the tag on the reader.
++// The configured one, except that a tag carrying a spool URL keeps it: OpenSpool
++// or FilaMan selected becomes "Spool URL + OpenSpool" there, so a write adds the
++// record instead of replacing the URL with it. (Whether that fits is the
++// caller's size check, as for any NDEF format - on an NTAG213 nothing is
++// written and the URL stays.) ACE and the URL formats are left as chosen.
++TagFormat tagWriteFormatFor(uint8_t configured);
+ 
+ // Whether the record on the tag disagrees with the spool it is bound to.
+ // want receives what that spool would put on a tag right now, so the caller can
+diff -ruN a/src/ui/label_buttons.cpp b/src/ui/label_buttons.cpp
+--- a/src/ui/label_buttons.cpp	1970-01-01 01:00:00
++++ b/src/ui/label_buttons.cpp	2026-11-01 14:48:16
+@@ -0,0 +1,41 @@
++#include "ui/label_buttons.h"
++
++#include "app/deferred_actions.h"
++#include "hardware/sd_logger.h"
++#include "lang.h"
++#include "ui/theme.h"
++
++void addLabelPrintButtons(lv_obj_t* hdr, lv_obj_t* title) {
++  lv_obj_set_width(title, 120);
++  lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
++  lv_obj_align(title, LV_ALIGN_LEFT_MID, 14, 0);
++  for (int i = 0; i < 2; i++) {
++    const bool filament = i == 1;
++    lv_obj_t* btn = lv_btn_create(hdr);
++    lv_obj_set_size(btn, 130, 34);
++    // 138..268 and 274..404, the X starts at 410
++    lv_obj_set_pos(btn, 138 + i * 136, 9);
++    lv_obj_set_style_bg_color(btn, lv_color_hex(UI_COL_ROW), 0);
++    lv_obj_set_style_bg_color(btn, lv_color_hex(UI_COL_ROW_PRESS_FILL), LV_STATE_PRESSED);
++    lv_obj_set_style_border_color(btn, lv_color_hex(UI_COL_ACCENT), 0);
++    lv_obj_set_style_border_width(btn, 1, 0);
++    lv_obj_set_style_radius(btn, UI_RADIUS_BTN, 0);
++    lv_obj_set_style_shadow_width(btn, 0, 0);
++    if (filament) {
++      lv_obj_add_event_cb(btn, [](lv_event_t* e) {
++        logSD("BTN: MoreInfo -> print filament label (label service)");
++        print_filament_label_pending = true;
++      }, LV_EVENT_CLICKED, NULL);
++    } else {
++      lv_obj_add_event_cb(btn, [](lv_event_t* e) {
++        logSD("BTN: MoreInfo -> print spool label (label service)");
++        print_spool_label_pending = true;
++      }, LV_EVENT_CLICKED, NULL);
++    }
++    lv_obj_t* lbl = lv_label_create(btn);
++    lv_label_set_text(lbl, T(filament ? STR_PRN_LABEL_FILAMENT : STR_PRN_LABEL_SPOOL));
++    lv_obj_set_style_text_color(lbl, lv_color_hex(UI_COL_ACCENT), 0);
++    lv_obj_set_style_text_font(lbl, UI_FONT_SMALL, 0);
++    lv_obj_center(lbl);
++  }
++}
+diff -ruN a/src/ui/label_buttons.h b/src/ui/label_buttons.h
+--- a/src/ui/label_buttons.h	1970-01-01 01:00:00
++++ b/src/ui/label_buttons.h	2026-11-01 14:48:16
+@@ -0,0 +1,13 @@
++#pragma once
++// ============================================================
++//  label_buttons.h - the print buttons in the More info header
++//  sdfp fork addition (SPOOLMANSCALE-SDFP.md, section 5b)
++// ============================================================
++#include <lvgl.h>
++
++// Left of the X, when a label service is set (services/label_fetch.h):
++// "Spool label" and "Filament label", printed straight away, and the title
++// moves to the left edge to make room. Without one the card keeps upstream's
++// single "Print label" and its print sheet. The caller checks that a print
++// can happen at all (Bluetooth, a printer, a known spool).
++void addLabelPrintButtons(lv_obj_t* hdr, lv_obj_t* title);
+diff -ruN a/src/ui/lookup_scan.cpp b/src/ui/lookup_scan.cpp
+--- a/src/ui/lookup_scan.cpp	2026-11-01 14:33:00
++++ b/src/ui/lookup_scan.cpp	2026-11-01 14:48:16
+@@ -44,6 +44,8 @@
+ 
+ #include "app/backend_switch.h"
+ #include "services/dried_migrate.h"
++#include "services/sound.h"
++#include "services/spool_url.h"
+ #include "services/drying_sync.h"
+ #include "services/backend.h"
+ #include "services/backend_api.h"
+@@ -129,6 +131,10 @@
+ // still ended inside the call. For a lookup that went through the worker the
+ // tick does it, once the verdict is in.
+ void lookupFollowUp(LookupOrigin origin, const char* uid) {
++  // sdfp fork: what the scan found, as a sound - the one place every verdict
++  // lands, straight from querySpoolman() or later from the inventory worker.
++  if (origin == LOOKUP_FROM_BAMBU || origin == LOOKUP_FROM_UID || origin == LOOKUP_FROM_NTAG)
++    soundTagVerdict(uid, sm_found);
+   switch (origin) {
+     case LOOKUP_FROM_BAMBU:
+       if (!sm_found && wifi_ok) {
+@@ -161,7 +167,9 @@
+       break;
+   }
+   // The card for it, opened by the loop once nothing else is in the way.
+-  if (!sm_found && s_verdict_certain && origin != LOOKUP_FROM_OTHER)
++  // sdfp fork: not for a tag about to link itself by its spool URL.
++  if (!sm_found && s_verdict_certain && origin != LOOKUP_FROM_OTHER &&
++      !spoolUrlLinkExpected(uid))
+     unknownSpoolOffer(origin == LOOKUP_FROM_BAMBU, uid);
+ }
+ 
+diff -ruN a/src/ui/more_info_screen.cpp b/src/ui/more_info_screen.cpp
+--- a/src/ui/more_info_screen.cpp	2026-11-01 14:33:00
++++ b/src/ui/more_info_screen.cpp	2026-11-01 14:48:16
+@@ -13,6 +13,8 @@
+ #include "bambu/bambu_tag.h"
+ #include "hardware/sd_logger.h"
+ #include "services/list_limits.h"
++#include "services/label_fetch.h"
++#include "ui/label_buttons.h"
+ #include "services/location_state.h"
+ #include "services/spoolman_actions.h"
+ #include "services/tag_uid.h"
+@@ -812,7 +814,11 @@
+   // itself runs from the loop; it starts the BLE stack and blocks for seconds.
+   const bool bt_print = bleEnabled() && labelPrinterConfigured(labelPrinterLoadConfig());
+   const bool pc_print = !bt_print && backendIsFilaMan();
+-  if ((bt_print || pc_print) && sm_found && sm_id > 0) {
++  if (bt_print && sm_found && sm_id > 0 && labelServiceConfigured()) {
++    // sdfp fork: a spool and a filament label from the label service
++    // (ui/label_buttons.cpp), printed straight away.
++    addLabelPrintButtons(hdr, lbl_title);
++  } else if ((bt_print || pc_print) && sm_found && sm_id > 0) {
+     lv_obj_t *btn_print = lv_btn_create(hdr);
+     lv_obj_set_size(btn_print, 116, 34);
+     lv_obj_set_pos(btn_print, 282, 9);
+diff -ruN a/src/ui/printer_screen.cpp b/src/ui/printer_screen.cpp
+--- a/src/ui/printer_screen.cpp	2026-11-01 14:33:00
++++ b/src/ui/printer_screen.cpp	2026-11-01 14:48:16
+@@ -11,6 +11,7 @@
+ #include "hardware/sd_logger.h"
+ #include "lang.h"
+ #include "services/ble_service.h"
++#include "services/label_fetch.h"
+ #include "services/label_layout.h"
+ #include "services/label_printer.h"
+ #include "services/label_render.h"
+@@ -76,25 +77,33 @@
+ 
+ // A spool's label under the print card. The card comes first, so the wait
+ // for the dates or the server has something on screen. own_layout: the
+-// scale's template even where a FilaMan preset is chosen.
++// scale's template even where a FilaMan preset is chosen. sdfp fork:
++// service asks the label service first (services/label_fetch.h) and falls
++// back to the scale's own label when it gives none.
+ static void printSpoolLabel(SpoolLabelData spool, bool own_layout = false,
+-                            LabelKind kind = LABEL_KIND_SPOOL) {
++                            LabelKind kind = LABEL_KIND_SPOOL, bool service = false) {
+   const LabelPrinterConfig c = labelPrinterLoadConfig();
+-  const bool server = !own_layout && kind == LABEL_KIND_SPOOL && labelServerInUse();
++  bool server = !own_layout && kind == LABEL_KIND_SPOOL && labelServerInUse();
+   LabelPrintResult result = LP_NO_PRINTER;
+   if (labelPrinterConfigured(c)) {
+     if (!bleEnabled()) result = LP_BLE_OFF;
+     else {
+       printCardShow();
+       LabelRaster raster{};
+-      result = spoolRaster(c, spool, server, kind, &raster);
++      bool fetched = false;
++      if (service) {
++        fetched = labelFetchRaster(c, spool.id, kind == LABEL_KIND_FILAMENT, &raster);
++        if (!fetched) logSD("Printer: no label from the service - printing the scale's own");
++      }
++      if (fetched) server = false;
++      result = fetched ? LP_OK : spoolRaster(c, spool, server, kind, &raster);
+       if (result == LP_OK) result = labelPrinterPrint(c, raster, printCardTick);
+       labelRasterFree(&raster);
+     }
+   }
+   logSDf("Printer: spool #%d %s label (%s) result=%d", spool.id,
+          kind == LABEL_KIND_FILAMENT ? "filament" : "spool",
+-         server ? "FilaMan preset" : "own layout", (int)result);
++         server ? "FilaMan preset" : service ? "label service" : "own layout", (int)result);
+   s_last_label = labelPrintResultString(result);
+   // Never switched over unasked: the card offers the scale's own layout.
+   if (result == LP_SERVER_LABEL) {
+@@ -112,7 +121,8 @@
+     showInfoPopup(STR_PRN_TITLE, STR_PRN_ERR_NO_SPOOL, INFO_WARN);
+     return;
+   }
+-  printSpoolLabel(spool, false, kind);
++  // sdfp fork: the More info buttons print the label service's label.
++  printSpoolLabel(spool, false, kind, labelServiceConfigured());
+ }
+ 
+ // The label of the last spool scanned, on the pad or not: the print sheet
+@@ -391,9 +401,12 @@
+     printer_calib_pending = false;
+     printFixedLabel(labelRenderCalibration, "calibration page");
+   }
+-  if (print_spool_label_pending) {
++  if (print_spool_label_pending || print_filament_label_pending) {
++    // sdfp fork: the filament label button of a label service.
++    const bool filament = print_filament_label_pending;
+     print_spool_label_pending = false;
+-    printerPrintPadLabel(LABEL_KIND_SPOOL);
++    print_filament_label_pending = false;
++    printerPrintPadLabel(filament ? LABEL_KIND_FILAMENT : LABEL_KIND_SPOOL);
+   }
+   // The label editor's print: the last spool scanned, on the pad or not,
+   // its own label or its filament's.
+diff -ruN a/src/ui/scale_menu.cpp b/src/ui/scale_menu.cpp
+--- a/src/ui/scale_menu.cpp	2026-11-01 14:33:00
++++ b/src/ui/scale_menu.cpp	2026-11-01 14:48:16
+@@ -255,11 +255,13 @@
+ // Indexed the way the rows are ordered, not by TagFormat value: OpenSpool
+ // first because it is what the filament managers read, ACE last because it
+ // only ever talks to the printer.
+-static const uint8_t TW_FMT_ORDER[3] = {
+-  TAG_FMT_OPENSPOOL, TAG_FMT_FILAMAN, TAG_FMT_ACE
++// sdfp fork: the spool URL formats after OpenSpool (services/spool_url.h).
++#define TW_FMT_COUNT 5
++static const uint8_t TW_FMT_ORDER[TW_FMT_COUNT] = {
++  TAG_FMT_OPENSPOOL, TAG_FMT_URL_OPENSPOOL, TAG_FMT_URL, TAG_FMT_FILAMAN, TAG_FMT_ACE
+ };
+-static const StringID TW_FMT_NAME[3] = {
+-  STR_TW_FMT_OPENSPOOL, STR_TW_FMT_FILAMAN, STR_TW_FMT_ACE
++static const StringID TW_FMT_NAME[TW_FMT_COUNT] = {
++  STR_TW_FMT_OPENSPOOL, STR_TW_FMT_URL_OS, STR_TW_FMT_URL, STR_TW_FMT_FILAMAN, STR_TW_FMT_ACE
+ };
+ 
+ static void addTagFormatRow(lv_obj_t *list, uint8_t idx) {
+@@ -383,5 +385,5 @@
+     lv_obj_t *arr_lbl = lv_obj_get_child(btn, -1);
+     if (arr_lbl) lv_label_set_text(arr_lbl, ""); }
+ 
+-  for (uint8_t i = 0; i < 3; i++) addTagFormatRow(list, i);
++  for (uint8_t i = 0; i < TW_FMT_COUNT; i++) addTagFormatRow(list, i);
+ }
+diff -ruN a/src/ui/spool_flow.cpp b/src/ui/spool_flow.cpp
+--- a/src/ui/spool_flow.cpp	2026-11-01 14:33:00
++++ b/src/ui/spool_flow.cpp	2026-11-01 14:48:16
+@@ -14,6 +14,7 @@
+ #include "bambu/material_match.h"
+ #include "hardware/sd_logger.h"
+ #include "lang.h"
++#include "services/sound.h"
+ #include "services/list_limits.h"
+ #include "services/spoolman_actions.h"
+ #include "services/server_reach.h"
+@@ -320,6 +321,15 @@
+ // Not static: the tag lookup hands it to the list cache together with the
+ // inventory it has just scanned, so that there stays one version of this rule.
+ bool spoolHasAnyTag(JsonObjectConst spool) {
++  // Spoolman's own tag relation (0.27) binds a spool just as well, and is
++  // where this firmware links once tagFieldAutoSelect() has moved a scale
++  // onto it. Asking only the extra fields offered every spool bound there as
++  // free in the link list (sdfp fork fix).
++  for (JsonObjectConst t : spool["tags"].as<JsonArrayConst>()) {
++    const char* uid = t["uid"] | "";
++    if (uid[0]) return true;
++  }
++
+   JsonObjectConst extra = spool["extra"];
+   if (extra.isNull()) return false;
+ 
+@@ -618,6 +628,8 @@
+   // flow has to see that whichever one the user has selected right now.
+   for (uint8_t f = 0; f < TAG_FIELD_EXTRA_COUNT; f++)
+     fL["extra"][tagFieldSpec(f).key] = true;
++  // And Spoolman's own tag relation, which spoolHasAnyTag() asks as well.
++  fL["tags"][0]["uid"] = true;
+   fL["filament"]["id"] = true;
+   fL["filament"]["name"] = true;
+   fL["filament"]["material"] = true;
+@@ -1339,6 +1351,22 @@
+ // and the second tag question. Called by doLinkPatch() for a link from the
+ // scale, and from the loop for one that arrived from outside - Spoolman's own
+ // web page binding the tag that lies on the reader.
++// The tag write after a link, on its own so a link the scale made by itself -
++// a tag that named its spool by URL (services/spool_url.h) - gets the same
++// question or write as one picked from the list (sdfp fork).
++void spoolFlowTagWriteAfterLink(int spool_id) {
++  if (g_tagwrite_mode == TAGWRITE_OFF || spool_id <= 0 || !tagIsWritableNtag()) return;
++  // The format for this tag: a URL on it is kept, see tagWriteFormatFor().
++  const TagFormat fmt = tagWriteFormatFor(g_tagwrite_fmt);
++  const uint16_t have = tagCachedBytes();
++  const bool fits = !TAG_FMT_IS_NDEF(fmt) || have == 0 || have >= TAGWRITE_NDEF_MIN_BYTES;
++  if (fits) tagwrite_after_link_id = spool_id;
++  else logSDf("Tag write: not asking, %u bytes on the tag is too small for %s",
++              (unsigned)have, tagFormatLabel(fmt));
++}
++
++bool spoolFlowTagWriteWaiting() { return tagwrite_after_link_id > 0; }
++
+ static void armLinkFollowUps(int spool_id, bool is_bambu) {
+   // The spool is known and an NTAG is lying on the reader, so its data could go
+   // onto the tag as well. Three things have to hold before that is worth
+@@ -1354,14 +1382,7 @@
+   //    than by tag type, so a tag reporting its size honestly decides for
+   //    itself. A tag that reports nothing at all (0) is not ruled out - the
+   //    write says what happened either way.
+-  if (g_tagwrite_mode != TAGWRITE_OFF && !is_bambu && tagIsWritableNtag()) {
+-    const uint16_t have = tagCachedBytes();
+-    const bool fits = !TAG_FMT_IS_NDEF(g_tagwrite_fmt) ||
+-                      have == 0 || have >= TAGWRITE_NDEF_MIN_BYTES;
+-    if (fits) tagwrite_after_link_id = spool_id;
+-    else logSDf("Tag write: not asking, %u bytes on the tag is too small for %s",
+-                (unsigned)have, tagFormatLabel(g_tagwrite_fmt));
+-  }
++  if (!is_bambu) spoolFlowTagWriteAfterLink(spool_id);
+ 
+   // The tag on the other flange, once the write above has settled. Three
+   // conditions, and the order is the cheap ones first: the user asked for the
+@@ -1470,11 +1491,10 @@
+   // Asked before the reload below, because the answer to it is already in.
+   if (patchSpoolTagTakeNativeMissing()) nativemissing_pending = true;
+ 
+-  // The next list comes out of the cache, and this spool is no longer free.
+-  // Not for Spoolman's own tag relation: spoolHasAnyTag() does not see it, so
+-  // a downloaded list keeps offering such a spool, and the cache has to say
+-  // what a download would say - no more and no less.
+-  if (!tagFieldSelected().is_native) spoolCacheSetBound(spool_id, true);
++  // The next list comes out of the cache, and this spool is no longer free -
++  // through Spoolman's own tag relation as well, now that spoolHasAnyTag()
++  // sees it: the cache says what a download would say (sdfp fork fix).
++  spoolCacheSetBound(spool_id, true);
+ 
+   // And the uid index learns the tag it has just watched being bound. The
+   // searches find it from now on, but the index must not be what calls it
+@@ -1484,6 +1504,7 @@
+     uidIndexNote(linked, 3);
+   }
+ 
++  soundTagLinked();  // sdfp fork: the chime
+   closeLinkOverlays();
+ 
+   // Re-query Spoolman - use single-spool endpoint since we know the ID
+diff -ruN a/src/ui/spool_flow.h b/src/ui/spool_flow.h
+--- a/src/ui/spool_flow.h	2026-11-01 14:33:00
++++ b/src/ui/spool_flow.h	2026-11-01 14:48:16
+@@ -79,6 +79,10 @@
+ // The second tag question alone, for a link the scale's own web page made
+ // together with a write - the tag is already written, so only that follows.
+ void spoolFlowAskSecondTag(int spool_id);
++// sdfp fork: the tag write a link is followed by (ask or write, as the tag write
++// mode says), for a link the scale made by itself; and whether one is waiting.
++void spoolFlowTagWriteAfterLink(int spool_id);
++bool spoolFlowTagWriteWaiting();
+ // The "move the tag off spool N?" question, for uiModalWaiting().
+ bool isSpoolFlowTagMoveOpen();
+ void showVendorList();
+diff -ruN a/src/ui/tag_view.cpp b/src/ui/tag_view.cpp
+--- a/src/ui/tag_view.cpp	2026-11-01 14:33:00
++++ b/src/ui/tag_view.cpp	2026-11-01 14:48:16
+@@ -451,7 +451,7 @@
+ 
+   // The same floor the question after a link keeps: an NDEF record does not
+   // fit an NTAG213, and offering it there only ends in "needs 176 bytes".
+-  const bool fits = !(TAG_FMT_IS_NDEF(g_tagwrite_fmt) && s.bytes &&
++  const bool fits = !(TAG_FMT_IS_NDEF(tagWriteFormatFor(g_tagwrite_fmt)) && s.bytes &&
+                       s.bytes < TAGWRITE_NDEF_MIN_BYTES);
+   char write[40];
+   if (!s.found)  copyT(write, sizeof(write), STR_TV_NOSPOOL);
+diff -ruN a/src/ui/tag_write_popup.cpp b/src/ui/tag_write_popup.cpp
+--- a/src/ui/tag_write_popup.cpp	2026-11-01 14:33:00
++++ b/src/ui/tag_write_popup.cpp	2026-11-01 14:48:16
+@@ -37,6 +37,17 @@
+ static bool     erase_ask_pending = false;
+ static bool     erase_now_pending = false;   // erase already agreed to, no question
+ static bool     mismatch_ask_pending = false;
++static bool     urlrec_ask_pending = false;  // sdfp fork, see tagUrlRecordTick()
++
++// sdfp fork: the tag and spool last asked about (or written) for adding the
++// OpenSpool record to a URL-only tag - once per pair, like the mismatch.
++static char s_urlrec_uid[26] = "";
++static int  s_urlrec_id = 0;
++static void urlRecordSettle(int spool_id) {
++  snprintf(s_urlrec_uid, sizeof(s_urlrec_uid), "%s", g_tag.uid_str);
++  s_urlrec_id = spool_id;
++  urlrec_ask_pending = false;
++}
+ static int      s_spool_id      = 0;
+ static AskMode  s_mode          = ASK_WRITE;
+ // What the tag held when the unlink asked. Taken then and not later, because
+@@ -195,7 +206,7 @@
+       // The erase says what is about to be lost, the write says what is about
+       // to be put there - and that is now a setting, not a constant.
+       const char *arg = (s_mode == ASK_ERASE) ? s_erase_fmt
+-                                              : tagFormatLabel(g_tagwrite_fmt);
++                                              : tagFormatLabel(tagWriteFormatFor(g_tagwrite_fmt));
+       snprintf(hb, sizeof(hb), T(hint), arg[0] ? arg : "OpenSpool");
+       lv_label_set_text(lbl_hint, hb); }
+     // Body text, not a caption: this line carries what is about to be written
+@@ -260,7 +271,8 @@
+   logSDf("TagWrite: writing spool %d without asking", spool_id);
+   // A question about the same tag waiting to be shown is answered by this.
+   mismatch_ask_pending = false;
+-  if (tagWriteRequest(spool_id, (TagFormat)g_tagwrite_fmt, false)) {
++  urlRecordSettle(spool_id);
++  if (tagWriteRequest(spool_id, tagWriteFormatFor(g_tagwrite_fmt), false)) {
+     // The same watch a confirmed question sets, so the result popup appears
+     // through the one path that already knows how to show it.
+     s_watching = true;
+@@ -273,6 +285,7 @@
+ 
+ void showTagWriteAskPopup(int spool_id) {
+   if (scr_tag_write || spool_id <= 0) return;
++  urlRecordSettle(spool_id);
+   s_spool_id = spool_id;
+   s_mode     = ASK_WRITE;
+   logSDf("SHOW: TagWriteAskPopup spool=%d", spool_id);
+@@ -300,6 +313,45 @@
+   buildAsk(STR_TV_ERASE_TITLE, STR_TV_ERASE_HINT, STR_TW_BTN_ERASE, STR_TW_BTN_KEEP);
+ }
+ 
++// sdfp fork: the question tagUrlRecordTick() decided on.
++static void showUrlRecordAskPopup() {
++  if (scr_tag_write || s_spool_id <= 0) return;
++  s_mode = ASK_WRITE;
++  logSDf("SHOW: UrlRecordAskPopup spool=%d", s_spool_id);
++  buildAsk(STR_TW_URLREC_TITLE, STR_TW_URLREC_HINT, STR_TW_BTN_WRITE, STR_TW_BTN_SKIP);
++}
++
++// sdfp fork: a known spool's tag that carries only its spool URL (a phone wrote
++// it, or the "Spool URL" format) gets the OpenSpool record added - asked once
++// per tag and spool, or written straight away, as the tag write mode says. Off
++// with the mode off, and never where the record would not fit: the URL stays.
++void tagUrlRecordTick() {
++  if (g_tagwrite_mode == TAGWRITE_OFF) return;
++  if (s_watching || strcmp(tagWriteState(), "pending") == 0) return;
++  if (!wifi_ok || !tag_present || !sm_found || sm_id <= 0) return;
++  if (!tagIsWritableNtag()) return;
++  const TagInfo* ti = tagCachedInfo();
++  if (strcmp(ti->fmt, "Spool URL") != 0 || !ti->spool_code[0]) return;
++  if (tagWriteFormatFor(g_tagwrite_fmt) != TAG_FMT_URL_OPENSPOOL) return;
++  const uint16_t have = tagCachedBytes();
++  if (have && have < TAGWRITE_NDEF_MIN_BYTES) return;
++  if (scr_tag_write || erase_ask_pending || mismatch_ask_pending || urlrec_ask_pending) return;
++  if (spoolFlowTagWriteWaiting()) return;  // a link's own question comes first
++  if (isConfirmPopupOpen() || isSpoolFlowIdInputOpen() ||
++      isSpoolFlowLinkEntryOpen() || isSecondTagPopupOpen())
++    return;
++  if (s_urlrec_id == sm_id && strcmp(s_urlrec_uid, g_tag.uid_str) == 0) return;
++  urlRecordSettle(sm_id);
++  logSDf("Tag: spool %d has a URL-only tag, %s the OpenSpool record", sm_id,
++         g_tagwrite_mode == TAGWRITE_ALWAYS ? "adding" : "asking about");
++  if (g_tagwrite_mode == TAGWRITE_ALWAYS) {
++    startTagWriteNoAsk(sm_id);
++  } else {
++    s_spool_id = sm_id;
++    urlrec_ask_pending = true;
++  }
++}
++
+ // The decision was taken in tagMismatchTick(), which also built the two lines.
+ static void showTagMismatchPopup() {
+   if (scr_tag_write || !s_mismatch_detail[0]) return;
+@@ -353,7 +405,7 @@
+   s_mism_asked_id = sm_id;
+ 
+   TagInfo want;
+-  if (!tagDiffersFromSpool(sm_id, (TagFormat)g_tagwrite_fmt, &want)) return;
++  if (!tagDiffersFromSpool(sm_id, tagWriteFormatFor(g_tagwrite_fmt), &want)) return;
+ 
+   const TagInfo *have = tagCachedInfo();
+   char have_col[10] = "", want_col[10] = "";
+@@ -402,7 +454,7 @@
+   // all from the device.
+   const bool queued = (s_mode == ASK_ERASE)
+                         ? tagWriteRequestErase(s_erase_uid)
+-                        : tagWriteRequest(s_spool_id, (TagFormat)g_tagwrite_fmt, false);
++                        : tagWriteRequest(s_spool_id, tagWriteFormatFor(g_tagwrite_fmt), false);
+   if (queued) {
+     s_watching = true;
+     // From here to the result the loop is busy with the tag and the screen
+@@ -470,6 +522,11 @@
+     mismatch_ask_pending = false;
+     // A write that started after the question was taken answers it.
+     if (!s_watching) showTagMismatchPopup();
++  }
++
++  if (urlrec_ask_pending) {  // sdfp fork
++    urlrec_ask_pending = false;
++    if (!s_watching) showUrlRecordAskPopup();
+   }
+ 
+   if (!close_pending) return;
+diff -ruN a/src/ui/tag_write_popup.h b/src/ui/tag_write_popup.h
+--- a/src/ui/tag_write_popup.h	2026-11-01 14:33:00
++++ b/src/ui/tag_write_popup.h	2026-11-01 14:48:16
+@@ -47,6 +47,8 @@
+ // write it again when the two disagree. Loop task only - it fetches the spool.
+ // Does nothing unless g_tagmismatch_ask is on.
+ void tagMismatchTick();
++// sdfp fork: offers the OpenSpool record for a known spool's URL-only tag.
++void tagUrlRecordTick();
+ 
+ bool isTagWritePopupOpen();
+ 
+diff -ruN a/src/ui/ui_common.cpp b/src/ui/ui_common.cpp
+--- a/src/ui/ui_common.cpp	2026-11-01 14:33:00
++++ b/src/ui/ui_common.cpp	2026-11-01 14:48:16
+@@ -427,6 +427,19 @@
+     return;
+   }
+ 
++  // sdfp fork: a choice without a screen of its own steps to its next value
++  // (skipping any opt_ok() refuses), as a switch flips.
++  if (s->kind == SET_ENUM && s->opt_count) {
++    uint8_t v = settingGet(*s);
++    for (uint8_t i = 0; i < s->opt_count; i++) {
++      v = (uint8_t)((v + 1) % s->opt_count);
++      if (!s->opt_ok || s->opt_ok(v)) break;
++    }
++    settingSet(*s, v);
++    logSDf("BTN: Options -> %s %u", s->id, (unsigned)v);
++    requestOptionsRebuild();
++    return;
++  }
+   if (s->kind != SET_BOOL) return;
+   const uint8_t now = settingGet(*s);
+   settingSet(*s, now ? 0 : 1);
+diff -ruN a/src/web/pages/page_printer.cpp b/src/web/pages/page_printer.cpp
+--- a/src/web/pages/page_printer.cpp	2026-11-01 14:33:00
++++ b/src/web/pages/page_printer.cpp	2026-11-01 14:48:16
+@@ -19,6 +19,7 @@
+ #include "app/deferred_actions.h"
+ #include "hardware/sd_logger.h"
+ #include "services/ble_service.h"
++#include "services/label_fetch.h"
+ #include "services/label_printer.h"
+ #include "ui/ble_devices_screen.h"
+ #include "ui/printer_screen.h"
+@@ -138,7 +139,9 @@
+   j += String((unsigned)labelPrinterContentWidth(c.model, c.media_width_mm));
+   j += F(",\"dpi\":");
+   j += String((unsigned)labelPrinterProfile(c.model).dpi);
+-  j += F("},\"lastTest\":");
++  j += F("},\"labelsvc\":\"");
++  j += jsonText(labelServiceUrl());
++  j += F("\",\"lastTest\":");
+   const int last = printerLastTestResult();
+   if (last < 0) j += F("null");
+   else { j += '"'; j += jsonText(T(last)); j += '"'; }
+@@ -293,6 +296,20 @@
+   h += F("</span><span class='v' id='lt'></span></div>");
+ }
+ 
++// ---- sdfp fork: the label service (services/label_fetch.h) ---------------
++static void labelServiceCard(String& h) {
++  h += F("<div class='card wide'><h2>");
++  h += T(STR_W_P_SVC_TITLE);
++  h += F("</h2><div class='field'><label>");
++  h += T(STR_W_P_SVC_ADDR);
++  h += F("</label><div class='inrow'><input id='su' type='url' style='flex:1' "
++         "placeholder='http://192.168.1.20:8710' autocomplete='off'><button id='sb'>");
++  h += T(STR_W_SAVE);
++  h += F("</button></div><span class='hint'>");
++  h += T(STR_W_P_SVC_HINT);
++  h += F("</span><span class='msg' id='su-s'></span></div></div>");
++}
++
+ // ---- where the label runs under the head ---------------------------------
+ // The strip is the print row, the block on it the label: it moves with every
+ // change, so the setting reads without words. Its look sits with the rest of
+@@ -475,6 +492,7 @@
+          "$('pmr').style.display=d.printer.thermal?'none':'';}"
+          "function paint(d){"
+          "bar(d);cards(d);tile(d);"
++         "if(document.activeElement!==$('su'))$('su').value=d.labelsvc||'';"
+          "$('pc').style.display=d.printer.configured?'':'none';"
+          "document.querySelectorAll('.pr-rec').forEach(function(e){"
+          "e.style.display=+e.dataset.v===d.printer.rec?'':'none';});"
+@@ -556,6 +574,8 @@
+          "$('xo').addEventListener('change',function(){setOff(dots(+$('xo').value||0));});"
+          "$('cb').addEventListener('click',function(){"
+          "postFlash('/api/printer/calib','','cb-s',4000).then(function(){setTimeout(load,12000);});});"
++         "$('sb').addEventListener('click',function(){"
++         "postFlash('/api/printer/labelsvc',$('su').value.trim(),'su-s',4000).then(load);});"
+          "$('fb').addEventListener('click',function(){"
+          "postFlash('/api/printer/forget','','pd-s',4000).then(load);});"
+          // The restart route sits behind the maintenance gate; a shut one
+@@ -594,6 +614,7 @@
+   pickers(h, c);
+   testRow(h);
+   h += F("</div>");
++  labelServiceCard(h);
+   calibrationCard(h, c);
+   h += F("</div>");
+   pageScript(h);
+@@ -727,6 +748,16 @@
+     printer_calib_pending = true;
+     logSD("Web: calibration page requested");
+     srv.send(200, "text/plain", T(STR_W_P_QUEUED));
++  });
++
++  // sdfp fork: where labels come from (services/label_fetch.h). "" clears it.
++  srv.on("/api/printer/labelsvc", HTTP_POST, [&srv]() {
++    if (!webRequire(srv, GATE_CONFIG, T(STR_W_NAV_PRINTER))) return;
++    if (!labelServiceSetUrl(srv.arg("plain").c_str())) {
++      srv.send(400, "text/plain", T(STR_W_P_SVC_BAD));
++      return;
++    }
++    srv.send(200, "application/json", "{\"ok\":true}");
+   });
+ 
+   srv.on("/api/printer/forget", HTTP_POST, [&srv]() {
+diff -ruN a/src/web/pages/page_tags.cpp b/src/web/pages/page_tags.cpp
+--- a/src/web/pages/page_tags.cpp	2026-11-01 14:33:00
++++ b/src/web/pages/page_tags.cpp	2026-11-01 14:48:16
+@@ -85,6 +85,8 @@
+          // backends read back, where ACE only ever talks to the printer.
+          "<select id='tg-fmt' onchange='loadPreview()' style='flex:0 0 auto'>"
+          "<option value='1' selected>OpenSpool</option>"
++         "<option value='5'>Spool URL + OpenSpool</option>"
++         "<option value='4'>Spool URL</option>"
+          "<option value='3'>FilaMan</option>"
+          "<option value='0'>Anycubic ACE</option>"
+          "</select></div></div>"
+@@ -146,6 +148,8 @@
+   h += F("</label><div class='inrow'>"
+          "<select id='to-fmt' style='min-width:210px'>"
+          "<option value='1'>OpenSpool</option>"
++         "<option value='5'>Spool URL + OpenSpool</option>"
++         "<option value='4'>Spool URL</option>"
+          "<option value='3'>FilaMan</option>"
+          "<option value='0'>Anycubic ACE</option>"
+          "</select></div></div>"
+@@ -621,6 +625,8 @@
+     case 0:  return TAG_FMT_ACE;
+     case 2:  return TAG_FMT_ERASE;
+     case 3:  return TAG_FMT_FILAMAN;
++    case 4:  return TAG_FMT_URL;            // sdfp fork
++    case 5:  return TAG_FMT_URL_OPENSPOOL;  // sdfp fork
+     default: return TAG_FMT_OPENSPOOL;
+   }
+ }
+@@ -881,7 +887,7 @@
+       const int f = body.substring(c1 + 1, c2 < 0 ? body.length() : c2).toInt();
+       // Only the three the device can write. Erase answers an unlink and is
+       // not offered here, and an unknown number must not reach NVS.
+-      if (f == TAG_FMT_ACE || f == TAG_FMT_OPENSPOOL || f == TAG_FMT_FILAMAN)
++      if (f != TAG_FMT_ERASE && TAG_FMT_WRITABLE(f))
+         g_tagwrite_fmt = (uint8_t)f;
+     }
+     // Absent from a page still sitting in a browser from before this switch
+diff -ruN a/tools/lang_fr.jsonl b/tools/lang_fr.jsonl
+--- a/tools/lang_fr.jsonl	2026-11-01 14:33:00
++++ b/tools/lang_fr.jsonl	2026-11-01 14:48:16
+@@ -716,6 +716,15 @@
+ {"bmax": null, "de": "OpenSpool", "en": "OpenSpool", "fr": "OpenSpool", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_TW_FMT_OPENSPOOL", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/scale_menu.cpp:262"], "st": "ok", "wover": null}
+ {"bmax": null, "de": "FilaMan", "en": "FilaMan", "fr": "FilaMan", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_TW_FMT_FILAMAN", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/scale_menu.cpp:262"], "st": "ok", "wover": null}
+ {"bmax": null, "de": "Anycubic ACE", "en": "Anycubic ACE", "fr": "Anycubic ACE", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_TW_FMT_ACE", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/scale_menu.cpp:262"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Spulen-URL + OpenSpool", "en": "Spool URL + OpenSpool", "fr": "URL bobine + OpenSpool", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_TW_FMT_URL_OS", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/scale_menu.cpp:264"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Spulen-URL", "en": "Spool URL", "fr": "URL bobine", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_TW_FMT_URL", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/scale_menu.cpp:264"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Ton beim Scannen", "en": "Scan sound", "fr": "Son au scan", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_SOUND", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/services/settings_registry.cpp:145"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Ein Ton, wenn ein Tag aufgelegt wird: ein kurzer hoher, wenn die Spule bekannt ist, zwei tiefe, wenn nicht, und ein aufsteigender Zweiklang, wenn ein Tag verknüpft wurde. Braucht einen Lautsprecher am SPK-Anschluss.", "en": "A sound when a tag is placed: one short high beep when the spool is known, two low beeps when it is not, and a rising two-tone chime when a tag was linked. Needs a speaker on the SPK connector.", "fr": "Un son quand un tag est posé : un bip aigu si la bobine est connue, deux bips graves sinon, et deux notes montantes quand un tag a été lié. Il faut un haut-parleur sur le connecteur SPK.", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_SOUND_INFO", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/services/settings_registry.cpp:145"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Leise", "en": "Low", "fr": "Bas", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_SOUND_LOW", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/services/settings_registry.cpp:81"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Mittel", "en": "Medium", "fr": "Moyen", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_SOUND_MEDIUM", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/services/settings_registry.cpp:81"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Laut", "en": "High", "fr": "Fort", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_SOUND_HIGH", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/services/settings_registry.cpp:81"], "st": "ok", "wover": null}
++{"bmax": null, "de": "OpenSpool ergänzen?", "en": "Add OpenSpool?", "fr": "Ajouter OpenSpool ?", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_TW_URLREC_TITLE", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/tag_write_popup.cpp:321"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Dieser Tag trägt nur die URL der Spule. Geschrieben wird %s: die URL bleibt, die OpenSpool-Daten kommen dazu.", "en": "This tag carries only the spool's URL. Writes %s: the URL stays, the OpenSpool record is added.", "fr": "Ce tag ne porte que l'URL de la bobine. Écrit %s : l'URL reste, les données OpenSpool s'ajoutent.", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_TW_URLREC_HINT", "note": "", "sig": {"brace": [], "conv": ["%s"], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/tag_write_popup.cpp:321"], "st": "ok", "wover": null}
+ {"bmax": null, "de": "Automatik an der Waage", "en": "Automatic on the scale", "fr": "Actions automatiques de la balance", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_W_C_TAGOPTS", "note": "DE reworded upstream, re-read", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/web/pages/page_tags.cpp:127", "src/web/pages/page_tags.cpp:862", "src/web/pages/page_tags.cpp:870"], "st": "ok", "wover": null}
+ {"bmax": null, "de": "Nach dem Verlinken", "en": "After linking", "fr": "Après la liaison", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_W_TAGOPT_ASK", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/web/pages/page_tags.cpp:130"], "st": "ok", "wover": null}
+ {"bmax": null, "de": "Format", "en": "Format", "fr": "Format", "grp": "Writing a tag after a link. Backend independent: what goes on a tag is an", "id": "STR_W_TAGOPT_FMT", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/web/pages/page_tags.cpp:145"], "st": "ok", "wover": null}
+@@ -1018,6 +1027,12 @@
+ {"bmax": null, "de": "An die Waage übergeben", "en": "Handed to the scale", "fr": "Transmis à la balance", "grp": "The printer page in the browser", "id": "STR_W_P_QUEUED", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/web/pages/page_label.cpp:759", "src/web/pages/page_printer.cpp:630", "src/web/pages/page_printer.cpp:695", "src/web/pages/page_printer.cpp:729"], "st": "ok", "wover": null}
+ {"bmax": null, "de": "Etikett drucken", "en": "Print label", "fr": "Imprimer", "grp": "The printer page in the browser", "id": "STR_PRN_LABEL_PRINT", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/more_info_screen.cpp:837", "src/ui/print_sheet.cpp:326"], "st": "ok", "wover": null}
+ {"bmax": null, "de": "Keine bekannte Spule aufgelegt.", "en": "No known spool on the pad.", "fr": "Aucune bobine connue posée.", "grp": "The printer page in the browser", "id": "STR_PRN_ERR_NO_SPOOL", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/print_sheet.cpp:134", "src/ui/printer_screen.cpp:112", "src/ui/printer_screen.cpp:124", "src/web/pages/page_label.cpp:750"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Etikett Spule", "en": "Spool label", "fr": "Étiq. bobine", "grp": "sdfp fork: labels from a label service (services/label_fetch.h)", "id": "STR_PRN_LABEL_SPOOL", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/label_buttons.cpp:36"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Etikett Filament", "en": "Filament label", "fr": "Étiq. filament", "grp": "sdfp fork: labels from a label service (services/label_fetch.h)", "id": "STR_PRN_LABEL_FILAMENT", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/label_buttons.cpp:36"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Etikettendienst", "en": "Label service", "fr": "Service d'étiquettes", "grp": "sdfp fork: labels from a label service (services/label_fetch.h)", "id": "STR_W_P_SVC_TITLE", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/web/pages/page_printer.cpp:302"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Adresse", "en": "Address", "fr": "Adresse", "grp": "sdfp fork: labels from a label service (services/label_fetch.h)", "id": "STR_W_P_SVC_ADDR", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/web/pages/page_printer.cpp:304"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Der Dienst, der die Etiketten rendert, z. B. http://192.168.1.20:8710 (sdfp). Gesetzt: Mehr Info bietet ein Spulen- und ein Filament-Etikett. Leer: das eigene Etikett der Waage.", "en": "The service that renders the labels, e.g. http://192.168.1.20:8710 (sdfp). Set: More info offers a spool label and a filament label. Empty: the scale's own label.", "fr": "Le service qui génère les étiquettes, p. ex. http://192.168.1.20:8710 (sdfp). Renseigné : Plus d'infos propose une étiquette bobine et une étiquette filament. Vide : l'étiquette de la balance.", "grp": "sdfp fork: labels from a label service (services/label_fetch.h)", "id": "STR_W_P_SVC_HINT", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/web/pages/page_printer.cpp:309"], "st": "ok", "wover": null}
++{"bmax": null, "de": "Muss mit http:// beginnen.", "en": "Must start with http://.", "fr": "Doit commencer par http://.", "grp": "sdfp fork: labels from a label service (services/label_fetch.h)", "id": "STR_W_P_SVC_BAD", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/web/pages/page_printer.cpp:757"], "st": "ok", "wover": null}
+ {"bmax": null, "de": "Farbe", "en": "Colour", "fr": "Couleur", "grp": "The captions on a printed label, short: the lines are 16 px on a 40 mm roll", "id": "STR_LBL_L_COLOR", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/services/label_facts.cpp:120", "src/services/label_facts.cpp:138", "src/ui/tag_view.cpp:350", "src/web/pages/page_label.cpp:56"], "st": "ok", "wover": null}
+ {"bmax": null, "de": "Etikett wird erstellt...", "en": "Preparing the label...", "fr": "Préparation...", "grp": "The print card, while the raster is drawn", "id": "STR_PRN_PH_RENDER", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/print_card.cpp:108", "src/ui/print_card.cpp:121"], "st": "ok", "wover": null}
+ {"bmax": null, "de": "Drucker wird gesucht...", "en": "Looking for the printer...", "fr": "Recherche en cours...", "grp": "The print card, while the raster is drawn", "id": "STR_PRN_PH_FIND", "note": "", "sig": {"brace": [], "conv": [], "newlines": 0, "symbol_gaps": [], "symbols": [], "tags": []}, "sites": ["src/ui/print_card.cpp:117"], "st": "ok", "wover": null}
